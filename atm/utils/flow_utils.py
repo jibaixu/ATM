@@ -151,6 +151,53 @@ def sample_tracks_visible_first(tracks, vis, num_samples=16):
     return sampled_tracks, sampled_vis
 
 
+def sample_tracks_nearest_to_grids(tracks, vis, num_samples):
+    """
+    在图像空间均匀生成网格参考点，并选取与其最接近的追踪点。
+    Args:
+        tracks: (track_len, n, 2) - 归一化坐标 [0, 1]
+        vis: (track_len, n)
+        num_samples: 需要采样的追踪点数量
+    """
+    # 1. 动态生成参考网格点
+    # 尝试使用 double grid 逻辑（覆盖效果更好），如果 num_samples 是 2*n^2
+    n_double = int(np.sqrt(num_samples // 2))
+    if 2 * n_double * n_double == num_samples:
+        reference_grid_points = sample_double_grid(n=n_double, device=tracks.device)
+    else:
+        # 否则使用普通单网格并截断
+        grid_size = int(np.ceil(np.sqrt(num_samples)))
+        reference_grid_points = sample_grid(n=grid_size, device=tracks.device, left=(0.05, 0.05), right=(0.95, 0.95))
+        reference_grid_points = reference_grid_points[:num_samples]
+
+    # 2. 获取初始帧的追踪点候选
+    first_points = tracks[0]  # (n, 2)
+    
+    # 优先选取初始帧可见的点作为采样候选 (参考 sample_tracks_visible_first 的逻辑)
+    vis_idx = torch.where(vis[0] > 0)[0]
+    if len(vis_idx) > 0:
+        candidates = first_points[vis_idx]
+        cand_indices = vis_idx
+    else:
+        # 如果没有可见点，则从所有点中选取
+        candidates = first_points
+        cand_indices = torch.arange(len(first_points)).to(tracks.device)
+
+    # 3. 计算每个网格参考点最近的追踪点索引
+    # 计算距离矩阵 (候选点数量, 采样点数量)
+    dist = torch.norm(candidates[:, None, :] - reference_grid_points[None, :, :], dim=-1)
+    
+    # 为每个网格点寻找最近的候选追踪点索引
+    nearest_idx_in_cand = torch.argmin(dist, dim=0)  # (num_samples,)
+    nearest_idx = cand_indices[nearest_idx_in_cand]
+
+    # 4. 返回采样后的轨迹和可见性
+    nearest_tracks = tracks[:, nearest_idx, :]
+    nearest_vis = vis[:, nearest_idx]
+    
+    return nearest_tracks, nearest_vis
+
+
 def tracks_to_binary_img(tracks, img_size):
     """
     tracks: (B, T, N, 2), where each track is a sequence of (u, v) coordinates; u is width, v is height
@@ -173,15 +220,24 @@ def tracks_to_binary_img(tracks, img_size):
     # img size is b x t x h x w
     img = repeat(img, 'b t h w -> (b t) h w')[:, None, :, :]
     import torch.nn.functional as F
-    # Generate 5x5 gaussian kernel
-    kernel = [[0.003765, 0.015019, 0.023792, 0.015019, 0.003765],
-              [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],
-              [0.023792, 0.094907, 0.150342, 0.094907, 0.023792],
-              [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],
-              [0.003765, 0.015019, 0.023792, 0.015019, 0.003765]]
+    #! Generate 5x5 gaussian kernel
+    # kernel = [[0.003765, 0.015019, 0.023792, 0.015019, 0.003765],
+    #           [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],
+    #           [0.023792, 0.094907, 0.150342, 0.094907, 0.023792],
+    #           [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],
+    #           [0.003765, 0.015019, 0.023792, 0.015019, 0.003765]]
+    # kernel /= np.max(kernel)
+    # kernel = torch.FloatTensor(kernel)[None, None, :, :].to(tracks.device)
+    # img = F.conv2d(img, kernel, padding=2)[:, 0, :, :]
+
+    #! Generate 3×3 gaussian kernel
+    kernel = [[0.5, 0.75, 0.5],
+            [0.75, 1.0, 0.75],
+            [0.5, 0.75, 0.5]]
     kernel /= np.max(kernel)
     kernel = torch.FloatTensor(kernel)[None, None, :, :].to(tracks.device)
-    img = F.conv2d(img, kernel, padding=2)[:, 0, :, :]
+    img = F.conv2d(img, kernel, padding=1)[:, 0, :, :]
+
     img = rearrange(img, '(b t) h w -> b t h w', b=B)
     if generation_size != img_size:
         img = F.interpolate(img, size=(img_size, img_size), mode="bicubic")

@@ -12,7 +12,7 @@ from atm.policy.vilt_modules.language_modules import *
 from .track_patch_embed import TrackPatchEmbed
 from .transformer import Transformer
 
-class TrackTransformer(nn.Module):
+class TrackTransformerAction(nn.Module):
     """
     flow video model using a BERT transformer
 
@@ -29,6 +29,7 @@ class TrackTransformer(nn.Module):
                  track_cfg,
                  vid_cfg,
                  language_encoder_cfg,
+                 action_dim=7,  #! 新增：动作维度
                  load_path=None):
         super().__init__()
         self.dim = dim = transformer_cfg.dim
@@ -36,6 +37,20 @@ class TrackTransformer(nn.Module):
         self.track_proj_encoder, self.track_decoder = self._init_track_modules(**track_cfg, dim=dim)
         self.img_proj_encoder, self.img_decoder = self._init_video_modules(**vid_cfg, dim=dim)
         self.language_encoder = self._init_language_encoder(output_size=dim, **language_encoder_cfg)
+        #! 新增：动作编码器初始化
+        self.action_encoder = nn.Sequential(
+            nn.Linear(action_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+        self.action_pos_embed = nn.Parameter(torch.randn(1, track_cfg.num_track_ts, dim))
+        # kaiming initialization
+        nn.init.kaiming_normal_(self.action_encoder[0].weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.action_encoder[2].weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.action_encoder[4].weight, mode='fan_in', nonlinearity='relu')
+
         self._init_weights(self.dim, self.num_img_patches)
 
         if load_path is not None:
@@ -151,6 +166,18 @@ class TrackTransformer(nn.Module):
         patches = patches + self.img_embed
 
         return patches
+    
+    #! 动作编码函数
+    def _encode_action(self, action):
+        """
+        action: (b, T, action_dim) -> (512, 16, 7)
+        returns: (b, T, dim) -> (512, 16, 384)
+        """
+        # 线性投影到模型维度
+        action_embeds = self.action_encoder(action) # (b, 16, 384)
+        # 加上动作特定的位置编码
+        action_embeds = action_embeds + self.action_pos_embed
+        return action_embeds
 
     def _mask_patches(self, patches, p):
         """
@@ -170,7 +197,7 @@ class TrackTransformer(nn.Module):
         mask_track[:, 1:] = track[:, [0]]
         return mask_track
 
-    def forward(self, vid, track, task_emb, p_img):
+    def forward(self, vid, track, task_emb, p_img, action):
         """
         track: (b, tl, n, 2), which means current time step t0 -> t0 + tl
         vid: (b, t, c, h, w), which means the past time step t0 - t -> t0
@@ -180,14 +207,17 @@ class TrackTransformer(nn.Module):
         B, T, _, _ = track.shape
         patches = self._encode_video(vid, p_img)  # (b, n_image, d)
         enc_track = self._encode_track(track)
+        #! 新增：处理动作编码
+        enc_action = self._encode_action(action)  # (b, T, dim)
 
         text_encoded = self.language_encoder(task_emb)  # (b, c)
         text_encoded = rearrange(text_encoded, 'b c -> b 1 c')
 
-        x = torch.cat([enc_track, patches, text_encoded], dim=1)
+        x = torch.cat([enc_track, patches, enc_action, text_encoded], dim=1)
         x = self.transformer(x)
 
-        rec_track, rec_patches = x[:, :self.num_track_patches], x[:, self.num_track_patches:-1]
+        rec_track = x[:, :self.num_track_patches]
+        rec_patches = x[:, self.num_track_patches : self.num_track_patches + self.num_img_patches]
         rec_patches = self.img_decoder(rec_patches)  # (b, n_image, 3 * t * patch_size ** 2)
         rec_track = self.track_decoder(rec_track)  # (b, (t n), 2 * patch_size)
         num_track_h = self.num_track_ts // self.track_patch_size
@@ -195,7 +225,7 @@ class TrackTransformer(nn.Module):
 
         return rec_track, rec_patches
 
-    def reconstruct(self, vid, track, task_emb, p_img):
+    def reconstruct(self, vid, track, task_emb, p_img, action):
         """
         wrapper of forward with preprocessing
         track: (b, tl, n, 2), which means current time step t0 -> t0 + tl
@@ -205,7 +235,7 @@ class TrackTransformer(nn.Module):
         assert len(vid.shape) == 5  # b, t, c, h, w
         track = self._preprocess_track(track)
         vid = self._preprocess_vid(vid)
-        return self.forward(vid, track, task_emb, p_img)
+        return self.forward(vid, track, task_emb, p_img, action)
 
     def forward_loss(self,
                      vid,
@@ -214,6 +244,7 @@ class TrackTransformer(nn.Module):
                      lbd_track,
                      lbd_img,
                      p_img,
+                     action,
                      return_outs=False,
                      vis=None):
         """
@@ -226,11 +257,11 @@ class TrackTransformer(nn.Module):
         if vis is None:
             vis = torch.ones((b, tl, n)).to(track.device)
 
-        track = self._preprocess_track(track)
+        track = self._preprocess_track(track)   # return track
         vid = self._preprocess_vid(vid)
         vis = self._preprocess_vis(vis)
 
-        rec_track, rec_patches = self.forward(vid, track, task_emb, p_img)
+        rec_track, rec_patches = self.forward(vid, track, task_emb, p_img, action)
         vis[vis == 0] = .1
         vis = repeat(vis, "b tl n -> b tl n c", c=2)
 
@@ -248,7 +279,7 @@ class TrackTransformer(nn.Module):
             return loss.sum(), ret_dict, (rec_track, rec_patches)
         return loss.sum(), ret_dict
 
-    def forward_vis(self, vid, track, task_emb, p_img):
+    def forward_vis(self, vid, track, task_emb, p_img, action):
         """
         track: (b, tl, n, 2)
         vid: (b, t, c, h, w)
@@ -261,7 +292,7 @@ class TrackTransformer(nn.Module):
         track = self._preprocess_track(track)
         vid = self._preprocess_vid(vid)
 
-        rec_track, rec_patches = self.forward(vid, track, task_emb, p_img)
+        rec_track, rec_patches = self.forward(vid, track, task_emb, p_img, action)
         track_loss = F.mse_loss(rec_track, track)
         img_loss = F.mse_loss(rec_patches, self._patchify(vid))
         loss = track_loss + img_loss

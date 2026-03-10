@@ -9,6 +9,10 @@ notebooks
 libero/task_embedding_caches/*
 
 
+## vscode
+.vscode/
+
+
 ## robomimic
 # pip distribution folder
 dist/

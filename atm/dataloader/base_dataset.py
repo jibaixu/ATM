@@ -27,6 +27,7 @@ class BaseDataset(Dataset):
                  augment_track=True,
                  views=None,
                  extra_state_keys=None,
+                 uniform_sample=False,  #! 新增参数
     ):
         super().__init__()
         self.dataset_dir = dataset_dir
@@ -43,6 +44,7 @@ class BaseDataset(Dataset):
         self.extra_state_keys = extra_state_keys
         self.cache_all = cache_all
         self.cache_image = cache_image
+        self.uniform_sample = uniform_sample #! 新增参数
         if not cache_all:
             assert not cache_image, "cache_image is only supported when cache_all is True."
 

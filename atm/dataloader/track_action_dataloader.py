@@ -4,7 +4,7 @@ from atm.dataloader.base_dataset import BaseDataset
 from atm.utils.flow_utils import sample_tracks_visible_first, sample_tracks_nearest_to_grids
 
 
-class ATMPretrainDataset(BaseDataset):
+class ATMActionPretrainDataset(BaseDataset):
     def __init__(self, *args, **kwargs):
         self._index_to_view_id = {}
         super().__init__(*args, **kwargs)
@@ -56,9 +56,15 @@ class ATMPretrainDataset(BaseDataset):
             demo = self.process_demo(self.load_h5(demo_pth))
             vids = self._load_image_list_from_demo(demo, view, time_offset, backward=True)  # t c h w
 
+        # 1. 提取轨迹和可见性掩码
         tracks = demo["root"][view]["tracks"][time_offset:time_offset + self.num_track_ts]  # track_len n 2
         vis = demo["root"][view]['vis'][time_offset:time_offset + self.num_track_ts]  # track_len n
+        # 2. 提取语言/任务嵌入
         task_emb = demo["root"]["task_emb_bert"]  # (dim,)
+        #! 3. 新增：提取动作序列
+        # 按照与 track 一致的时间窗口提取未来动作序列
+        # actions 已经在 BaseDataset.process_demo 中处理为 (Total_Steps, 7) 的 Tensor
+        action = demo["root"]["actions"][time_offset : time_offset + self.num_track_ts] # (T, 7)
 
         # augment videos
         if np.random.rand() < self.aug_prob:
@@ -74,4 +80,4 @@ class ATMPretrainDataset(BaseDataset):
         else:
             tracks, vis = sample_tracks_visible_first(tracks, vis, num_samples=self.num_track_ids)
 
-        return vids, tracks, vis, task_emb
+        return vids, tracks, vis, task_emb, action

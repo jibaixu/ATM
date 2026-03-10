@@ -1,3 +1,6 @@
+import os, sys
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import os
 from glob import glob
@@ -251,9 +254,9 @@ def generate_data(source_h5_path, target_dir, track_model, task_emb, skip_exist)
 
 
 @click.command()
-@click.option("--root", type=str, default="./data/libero/")
-@click.option("--save", type=str, default="./data/atm_libero/")
-@click.option("--suite", type=str, default="libero_spatial")
+@click.option("--root", type=str, default="/data1/jibaixu/Datasets/LIBERO/")
+@click.option("--save", type=str, default="/data1/jibaixu/Datasets/ATM/atm_libero/")
+@click.option("--suite", type=str, default="libero_goal")
 @click.option("--skip_exist", type=bool, default=False)
 def main(root, save, suite, skip_exist):
     """
@@ -261,17 +264,23 @@ def main(root, save, suite, skip_exist):
     save: str, target directory to save the preprocessed data
     suite: str, the name of assigned suite, [libero_spatial, libero_object, libero_goal, libero_10, libero_90]
     skip_exist: bool, whether to skip the existing preprocessed h5df file
+
+    #TODO:
+        libero_goal: 9(num_done=8)  libero_goal/put_the_wine_bottle_on_the_rack_demo
     """
     suite_dir = os.path.join(root, suite)
 
     # setup cotracker
-    cotracker = torch.hub.load(os.path.join(os.path.expanduser("~"), ".cache/torch/hub/facebookresearch_co-tracker_main/"), "cotracker2", source="local")
+    cotracker = torch.hub.load(os.path.join(os.path.expanduser("~"), "/data2/jibaixu/Codes/co-tracker/"), "cotracker2", source="local")
     cotracker = cotracker.eval().cuda()
 
     # load task name embeddings
     task_bert_embs_dict = get_task_bert_embs(root)
 
-    for source_h5 in os.listdir(suite_dir):
+    num_done = 9
+    for id, source_h5 in enumerate(os.listdir(suite_dir)):
+        if id < num_done:
+            continue
         source_h5_path = os.path.join(suite_dir, source_h5)
         file_name = source_h5.split('.')[0]
         task_name = get_task_name_from_file_name(file_name)

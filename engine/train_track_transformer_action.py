@@ -2,7 +2,7 @@ import os
 import sys
 def debug_on():
     # 指定使用的 GPU ID
-    os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,12 +10,12 @@ def debug_on():
     batch_size = 128
     num_track_ids = 128
     sys.argv = [
-        "train_track_transformer.py",
-        "--config-name=libero_track_transformer",
+        "train_track_transformer_action.py",
+        "--config-name=libero_track_transformer_action",
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         "train_gpus=[0]",
-        f"experiment=libero_track_transformer_bs_{batch_size}_numtrack_{num_track_ids}_libero-object_ep1001",
+        f"experiment=libero_track_transformer_action_bs_{batch_size}_numtrack_{num_track_ids}_libero-object_ep1001",
         "epochs=1001",
         'train_dataset=["/data1/jibaixu/Datasets/ATM/atm_libero/libero_object/*/train/"]',
         'val_dataset=["/data1/jibaixu/Datasets/ATM/atm_libero/libero_object/*/val/"]',
@@ -32,7 +32,7 @@ import lightning
 from lightning.fabric import Fabric
 
 from atm.model import *
-from atm.dataloader import ATMPretrainDataset, get_dataloader
+from atm.dataloader import ATMActionPretrainDataset, get_dataloader
 from atm.utils.log_utils import BestAvgLoss, MetricLogger
 from atm.utils.train_utils import init_wandb, setup_lr_scheduler, setup_optimizer
 
@@ -47,16 +47,16 @@ def main(cfg: DictConfig):
 
     None if (cfg.dry or not fabric.is_global_zero) else init_wandb(cfg)
 
-    train_dataset = ATMPretrainDataset(dataset_dir=cfg.train_dataset, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
+    train_dataset = ATMActionPretrainDataset(dataset_dir=cfg.train_dataset, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
     train_loader = get_dataloader(train_dataset, mode="train", num_workers=cfg.num_workers, batch_size=cfg.batch_size)
 
-    train_vis_dataset = ATMPretrainDataset(dataset_dir=cfg.train_dataset, vis=True, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
+    train_vis_dataset = ATMActionPretrainDataset(dataset_dir=cfg.train_dataset, vis=True, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
     train_vis_dataloader = get_dataloader(train_vis_dataset, mode="train", num_workers=1, batch_size=1)
 
-    val_dataset = ATMPretrainDataset(dataset_dir=cfg.val_dataset, **cfg.dataset_cfg, aug_prob=0.)
+    val_dataset = ATMActionPretrainDataset(dataset_dir=cfg.val_dataset, **cfg.dataset_cfg, aug_prob=0.)
     val_loader = get_dataloader(val_dataset, mode="val", num_workers=cfg.num_workers, batch_size=cfg.batch_size * 2)
 
-    val_vis_dataset = ATMPretrainDataset(dataset_dir=cfg.val_dataset, vis=True, **cfg.dataset_cfg, aug_prob=0.)
+    val_vis_dataset = ATMActionPretrainDataset(dataset_dir=cfg.val_dataset, vis=True, **cfg.dataset_cfg, aug_prob=0.)
     val_vis_dataloader = get_dataloader(val_vis_dataset, mode="val", num_workers=1, batch_size=1)
 
     model_cls = eval(cfg.model_name)
@@ -163,9 +163,9 @@ def run_one_epoch(fabric,
 
     model.train()
     i = 0
-    for vid, track, vis, task_emb in tqdm(dataloader):
+    for vid, track, vis, task_emb, action in tqdm(dataloader):
         if mix_precision:
-            vid, track, vis, task_emb = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16()
+            vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
         b, t, c, h, w = vid.shape
         b, tl, n, _ = track.shape
         b, tl, n = vis.shape
@@ -175,7 +175,8 @@ def run_one_epoch(fabric,
             task_emb,
             lbd_track=lbd_track,
             lbd_img=lbd_img,
-            p_img=p_img)  # do not use vis
+            p_img=p_img,
+            action=action)  # do not use vis
         optimizer.zero_grad()
         fabric.backward(loss)
 
@@ -207,10 +208,10 @@ def evaluate(model, dataloader, lbd_track, lbd_img, p_img, mix_precision=False, 
     model.eval()
 
     i = 0
-    for vid, track, vis, task_emb in tqdm(dataloader):
-        vid, track, vis, task_emb = vid.cuda(), track.cuda(), vis.cuda(), task_emb.cuda()
+    for vid, track, vis, task_emb, action in tqdm(dataloader):
+        vid, track, vis, task_emb, action = vid.cuda(), track.cuda(), vis.cuda(), task_emb.cuda(), action.cuda()
         if mix_precision:
-            vid, track, vis, task_emb = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16()
+            vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
         b, t, c, h, w = vid.shape
         b, tl, n, _ = track.shape
 
@@ -221,7 +222,8 @@ def evaluate(model, dataloader, lbd_track, lbd_img, p_img, mix_precision=False, 
             lbd_track=lbd_track,
             lbd_img=lbd_img,
             p_img=p_img,
-            vis=vis)
+            vis=vis,
+            action=action)
 
         track_loss += ret_dict["track_loss"]
         vid_loss += ret_dict["img_loss"]
@@ -243,11 +245,11 @@ def visualize(model, dataloader, mix_precision=False):
     model.eval()
     keep_eval_dict = None
 
-    for i, (vid, track, vis, task_emb) in enumerate(dataloader):
-        vid, track, task_emb = vid.cuda(), track.cuda(), task_emb.cuda()
+    for i, (vid, track, vis, task_emb, action) in enumerate(dataloader):
+        vid, track, task_emb, action = vid.cuda(), track.cuda(), task_emb.cuda(), action.cuda()
         if mix_precision:
-            vid, track, task_emb = vid.bfloat16(), track.bfloat16(), task_emb.bfloat16()
-        _, eval_dict = model.forward_vis(vid, track, task_emb, p_img=0)
+            vid, track, task_emb, action = vid.bfloat16(), track.bfloat16(), task_emb.bfloat16(), action.bfloat16()
+        _, eval_dict = model.forward_vis(vid, track, task_emb, p_img=0, action=action)
         if keep_eval_dict is None or torch.rand(1) < 0.1:
             keep_eval_dict = eval_dict
 

@@ -8,14 +8,14 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # input parameters
 parser = argparse.ArgumentParser()
-parser.add_argument("--suite", default="libero_goal", choices=["libero_spatial", "libero_object", "libero_goal", "libero_100"], 
+parser.add_argument("--suite", default="libero_object", choices=["libero_spatial", "libero_object", "libero_goal", "libero_100"], 
                     help="The name of the desired suite, where libero_10 is the alias of libero_long.")
 args = parser.parse_args()
 
 # training configs
-CONFIG_NAME = "libero_track_transformer"
+CONFIG_NAME = "libero_track_transformer_action"
 
-gpu_ids = [0, 1, 2, 3]
+gpu_ids = [0]
 
 root_dir = "./data/atm_libero/"
 suite_name = args.suite
