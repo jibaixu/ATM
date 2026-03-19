@@ -29,7 +29,7 @@ class TrackTransformerAction(nn.Module):
                  track_cfg,
                  vid_cfg,
                  language_encoder_cfg,
-                 action_dim=7,  #! 新增：动作维度
+                 action_dim=14,  #! 新增：动作维度
                  load_path=None):
         super().__init__()
         self.dim = dim = transformer_cfg.dim

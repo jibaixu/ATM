@@ -2,23 +2,25 @@ import os
 import sys
 def debug_on():
     # 指定使用的 GPU ID
-    os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    batch_size = 128
-    num_track_ids = 128
+    batch_size = 4
+    num_track_ids = 256
     sys.argv = [
         "train_track_transformer.py",
-        "--config-name=libero_track_transformer",
+        "--config-name=robocoin_track_transformer",
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         "train_gpus=[0]",
-        f"experiment=libero_track_transformer_bs_{batch_size}_numtrack_{num_track_ids}_libero-object_ep1001",
+        f"experiment=robocoin_track_transformer_01B_bs_{batch_size}_numtrack_{num_track_ids}_robocoin-object_ep1001",
         "epochs=1001",
-        'train_dataset=["/data1/jibaixu/Datasets/ATM/atm_libero/libero_object/*/train/"]',
-        'val_dataset=["/data1/jibaixu/Datasets/ATM/atm_libero/libero_object/*/val/"]',
+        'train_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6/episodes_clipped_train.jsonl"',
+        'val_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6/episodes_clipped_val.jsonl"',
+        'train_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6"',
+        'val_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6"',
     ]
 debug_on()
 
@@ -32,7 +34,7 @@ import lightning
 from lightning.fabric import Fabric
 
 from atm.model import *
-from atm.dataloader import ATMPretrainDataset, get_dataloader
+from atm.dataloader import RoboCoinATMDataset, get_dataloader
 from atm.utils.log_utils import BestAvgLoss, MetricLogger
 from atm.utils.train_utils import init_wandb, setup_lr_scheduler, setup_optimizer
 
@@ -47,17 +49,17 @@ def main(cfg: DictConfig):
 
     None if (cfg.dry or not fabric.is_global_zero) else init_wandb(cfg)
 
-    train_dataset = ATMPretrainDataset(dataset_dir=cfg.train_dataset, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
+    train_dataset = RoboCoinATMDataset(jsonl_path=cfg.train_jsonl, dataset_dir=cfg.train_dataset_dir, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
     train_loader = get_dataloader(train_dataset, mode="train", num_workers=cfg.num_workers, batch_size=cfg.batch_size)
 
-    train_vis_dataset = ATMPretrainDataset(dataset_dir=cfg.train_dataset, vis=True, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
-    train_vis_dataloader = get_dataloader(train_vis_dataset, mode="train", num_workers=1, batch_size=1)
+    # train_vis_dataset = RoboCoinATMDataset(dataset_dir=cfg.train_dataset, vis=True, **cfg.dataset_cfg, aug_prob=cfg.aug_prob)
+    # train_vis_dataloader = get_dataloader(train_vis_dataset, mode="train", num_workers=1, batch_size=1)
 
-    val_dataset = ATMPretrainDataset(dataset_dir=cfg.val_dataset, **cfg.dataset_cfg, aug_prob=0.)
+    val_dataset = RoboCoinATMDataset(jsonl_path=cfg.val_jsonl, dataset_dir=cfg.val_dataset_dir, **cfg.dataset_cfg, aug_prob=0.)
     val_loader = get_dataloader(val_dataset, mode="val", num_workers=cfg.num_workers, batch_size=cfg.batch_size * 2)
 
-    val_vis_dataset = ATMPretrainDataset(dataset_dir=cfg.val_dataset, vis=True, **cfg.dataset_cfg, aug_prob=0.)
-    val_vis_dataloader = get_dataloader(val_vis_dataset, mode="val", num_workers=1, batch_size=1)
+    # val_vis_dataset = RoboCoinATMDataset(dataset_dir=cfg.val_dataset, vis=True, **cfg.dataset_cfg, aug_prob=0.)
+    # val_vis_dataloader = get_dataloader(val_vis_dataset, mode="val", num_workers=1, batch_size=1)
 
     model_cls = eval(cfg.model_name)
     model = model_cls(**cfg.model_cfg)
