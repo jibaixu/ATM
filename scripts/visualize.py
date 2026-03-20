@@ -17,9 +17,9 @@ from atm.utils.cotracker_utils import Visualizer
 
 # --- 基础配置 ---
 # 根据 preprocess_robocoin_2.py 中的设置 
-BASE_DIR = Path("/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6")
+BASE_DIR = Path("/data1_ssd/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320")
 VAL_JSONL = BASE_DIR / "episodes_clipped_train.jsonl"
-SAVE_DIR = "results/vis_dataset/tmp6"
+SAVE_DIR = "results/vis_dataset/resize_240_320"
 
 # --- 辅助函数：加载视频 ---
 def load_video_to_tensor(video_path):

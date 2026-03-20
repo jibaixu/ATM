@@ -1,5 +1,5 @@
 import os, sys
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '4'
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import random
@@ -27,7 +27,7 @@ TRAIN_TARGET_PER_TASK = 5000
 TRAIN_OVERFLOW_MAX = 500
 SEED = 42
 
-BASE_DIR = Path("/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6")
+BASE_DIR = Path("/data1_ssd/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320")
 TRAIN_OUTPUT_PATH = BASE_DIR / "episodes_clipped_train.jsonl"
 VAL_OUTPUT_PATH = BASE_DIR / "episodes_clipped_val.jsonl"
 
@@ -80,7 +80,7 @@ def track_through_video(video, track_model, num_points=1000):
     T, C, H, W = video.shape
     video_tensor = torch.from_numpy(video).cuda().float()
 
-    points = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points, uniform_sample=True)
+    points = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points)
     points = torch.from_numpy(points).float().cuda()
     points = torch.cat([torch.randint_like(points[:, :1], 0, T), points], dim=-1).cuda()
 
@@ -125,7 +125,7 @@ def track_through_video_sliding_window(video, track_model, num_points=1000, chun
     video_tensor = torch.from_numpy(video).cuda().float().unsqueeze(0) 
     
     if T_total <= chunk_size:
-        rand_pts = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points, uniform_sample=True)
+        rand_pts = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points)
         rand_pts = torch.from_numpy(rand_pts).float().cuda()
         rand_queries = torch.cat([torch.zeros_like(rand_pts[:, :1]), rand_pts], dim=-1).unsqueeze(0)
 
@@ -150,7 +150,7 @@ def track_through_video_sliding_window(video, track_model, num_points=1000, chun
     global_tracks_grid = torch.zeros(1, T_total, num_grid, 2).cuda()
     global_vis_grid = torch.zeros(1, T_total, num_grid).cuda()
 
-    rand_pts = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points, uniform_sample=True)
+    rand_pts = sample_from_mask(np.ones((H, W, 1)) * 255, num_samples=num_points)
     rand_pts = torch.from_numpy(rand_pts).float().cuda()
     rand_queries = torch.cat([torch.zeros_like(rand_pts[:, :1]), rand_pts], dim=-1).unsqueeze(0)
     
@@ -208,12 +208,23 @@ def track_by_independent_segments(video, track_model, num_points=1000, segment_s
     global_tracks = torch.zeros(1, T_total, num_grid + num_points, 2).cuda()
     global_vis = torch.zeros(1, T_total, num_grid + num_points).cuda()
 
-    for start_idx in range(0, T_total, segment_size):
-        end_idx = min(start_idx + segment_size, T_total)
+    # 计算分段索引：确保后面的段是完整的 segment_size
+    indices = []
+    curr_end = T_total
+    while curr_end > 0:
+        start = max(0, curr_end - segment_size)
+        indices.append((start, curr_end))
+        curr_end -= segment_size
+    
+    # 按时间顺序处理分段：[(0, 19), (19, 100)] (假设总长100)
+    indices.sort()
+
+    for start_idx, end_idx in indices:
         current_chunk = video_tensor[:, start_idx:end_idx]
         curr_h, curr_w = current_chunk.shape[3], current_chunk.shape[4]
         
-        rand_pts = sample_from_mask(np.ones((curr_h, curr_w, 1)) * 255, num_samples=num_points, uniform_sample=True)
+        # 这里的逻辑保持不变，但 current_chunk 的范围已经对齐了末尾
+        rand_pts = sample_from_mask(np.ones((curr_h, curr_w, 1)) * 255, num_samples=num_points)
         rand_pts = torch.from_numpy(rand_pts).float().cuda()
         rand_queries = torch.cat([torch.zeros_like(rand_pts[:, :1]), rand_pts], dim=-1).unsqueeze(0)
 
@@ -245,7 +256,7 @@ def load_video_frames(video_path: str):
 # --- 统一的切分逻辑 ---
 def build_segments(episodes: List[Dict], target_indices: Set[int]) -> List[Dict]:
     """
-    统一的切分函数：确保无论训练集还是验证集，都严格被切分为 81 帧。
+    修改后的切分函数：从视频末尾向前回溯，确保最后一段窗口是完整的 81 帧。
     """
     segments = []
     for ep in episodes:
@@ -253,19 +264,28 @@ def build_segments(episodes: List[Dict], target_indices: Set[int]) -> List[Dict]
             continue
             
         raw_length = ep["raw_length"]
-        # 按照 STRIDE (81) 进行滑动窗口切分
-        for start in range(0, raw_length, STRIDE):
+        
+        # 从 (总长度 - 窗口大小) 开始倒序计算起始点
+        # 例如 raw_length=100, WINDOW_SIZE=81: start 依次为 19, -62(停止)
+        # 这样生成的窗口就是 [19, 99]，而舍弃开头的 [0, 18]
+        current_starts = []
+        for start in range(raw_length - WINDOW_SIZE, -1, -STRIDE):
+            current_starts.append(start)
+        
+        # 为了保持 jsonl 文件中的时间顺序，我们反转回来
+        current_starts.sort()
+
+        for start in current_starts:
             end = start + WINDOW_SIZE - 1
             
-            # 仅保留完整的 WINDOW_SIZE (81) 帧段落
-            if end < raw_length:
-                ep_copy = ep.copy()
-                ep_copy.update({
-                    "length": WINDOW_SIZE,
-                    "start_frame": start,
-                    "end_frame": end,
-                })
-                segments.append(ep_copy)
+            # 由于起始点计算逻辑，这里 end 必然 <= raw_length - 1
+            ep_copy = ep.copy()
+            ep_copy.update({
+                "length": WINDOW_SIZE,
+                "start_frame": start,
+                "end_frame": end,
+            })
+            segments.append(ep_copy)
                 
     return segments
 
@@ -334,7 +354,7 @@ def write_jsonl(path: Path, entries: List[Dict]):
 def main(skip_exist):
     rng = random.Random(SEED)
     
-    cotracker_path = os.path.join(os.path.expanduser("~"), "/home/jibaixu/Codes/co-tracker/")
+    cotracker_path = os.path.join(os.path.expanduser("~"), "/data1_ssd/jibaixu/Codes/co-tracker/")
     if os.path.exists(cotracker_path):
         cotracker = torch.hub.load(cotracker_path, "cotracker2", source="local")
     else:
@@ -342,6 +362,8 @@ def main(skip_exist):
     cotracker = cotracker.eval().cuda()
 
     datasets = sorted([d for d in BASE_DIR.iterdir() if d.is_dir() and d.name.startswith("Cobot_Magic_")])
+    datasets = datasets[13:14]
+    print(f"Preprocess Datasets Robocoin include: f{datasets}")
 
     all_train = []
     all_val = []
@@ -376,7 +398,10 @@ def main(skip_exist):
             pt_path = task_embed_dir / f"{idx}.pt"
             torch.save(emb, pt_path)
 
-        video_views = ['observation.images.cam_high_rgb', 'observation.images.cam_left_wrist_rgb', 'observation.images.cam_right_wrist_rgb']
+        # video_views = ['observation.images.cam_high_rgb', 'observation.images.cam_left_wrist_rgb', 'observation.images.cam_right_wrist_rgb']
+        # video_views = ['observation.images.cam_high_rgb']
+        # video_views = ['observation.images.cam_left_wrist_rgb']
+        video_views = ['observation.images.cam_right_wrist_rgb']
 
         base_episodes = []
         with open(episodes_file, 'r', encoding='utf-8') as f:

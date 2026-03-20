@@ -59,7 +59,7 @@ Markdown
 MarkupSafe
 matplotlib
 mink
-moviepy
+moviepy==1.0.3
 mpmath
 msgpack
 multidict
