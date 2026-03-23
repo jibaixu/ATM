@@ -1,5 +1,5 @@
 import os, sys
-os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import random
@@ -351,7 +351,10 @@ def write_jsonl(path: Path, entries: List[Dict]):
 
 @click.command()
 @click.option("--skip_exist", type=bool, default=True, help="Skip tracking if .npz file already exists")
-def main(skip_exist):
+@click.option("--dataset_idx", type=int, default=0, help="Index of the dataset to process (e.g., 2)")
+@click.option("--view", type=click.Choice(['high', 'left', 'right']), default="high", help="Camera view to process")
+@click.option("--min_episode", type=int, default=0, help="Minimum episode index to start processing")
+def main(skip_exist, dataset_idx, view, min_episode):
     rng = random.Random(SEED)
     
     cotracker_path = os.path.join(os.path.expanduser("~"), "/data1_ssd/jibaixu/Codes/co-tracker/")
@@ -362,8 +365,8 @@ def main(skip_exist):
     cotracker = cotracker.eval().cuda()
 
     datasets = sorted([d for d in BASE_DIR.iterdir() if d.is_dir() and d.name.startswith("Cobot_Magic_")])
-    datasets = datasets[13:14]
-    print(f"Preprocess Datasets Robocoin include: f{datasets}")
+    datasets = datasets[dataset_idx : dataset_idx + 1]
+    print(f"Preprocess Datasets Robocoin include: {datasets}")
 
     all_train = []
     all_val = []
@@ -398,15 +401,20 @@ def main(skip_exist):
             pt_path = task_embed_dir / f"{idx}.pt"
             torch.save(emb, pt_path)
 
-        # video_views = ['observation.images.cam_high_rgb', 'observation.images.cam_left_wrist_rgb', 'observation.images.cam_right_wrist_rgb']
-        # video_views = ['observation.images.cam_high_rgb']
-        # video_views = ['observation.images.cam_left_wrist_rgb']
-        video_views = ['observation.images.cam_right_wrist_rgb']
+        # 将硬编码的 video_views 替换为字典映射
+        view_map = {
+            'high': 'observation.images.cam_high_rgb',
+            'left': 'observation.images.cam_left_wrist_rgb',
+            'right': 'observation.images.cam_right_wrist_rgb'
+        }
+        video_views = [view_map[view]]
 
         base_episodes = []
         with open(episodes_file, 'r', encoding='utf-8') as f:
             for line in tqdm(f, desc="Extracting Tracks"):
                 item = json.loads(line.strip())
+                if item["episode_index"] < min_episode:
+                    continue
                 
                 # --- 新增过滤逻辑：过滤掉初始长度不够 WINDOW_SIZE (81帧) 的片段 ---
                 if item["length"] < WINDOW_SIZE:
