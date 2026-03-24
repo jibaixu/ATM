@@ -8,25 +8,9 @@ mkdir -p log
 # 格式: "显卡编号:数据集编号:view:episode_min"
 # ==========================================
 TASKS=(
-    # "0:4:high:800"
-    # "0:4:left:800"
-    # "0:4:right:800"
-    
-    # "2:4:high:1000"
-    # "2:4:left:1000"
-    # "2:4:right:1000"
-
-    # "3:5:high:700"
-    # "3:5:left:700"
-    # "3:5:right:700"
-
-    "0:4:high:700"
-    "0:4:left:700"
-    "2:4:right:700"
-
-    "2:5:high:650"
-    "3:5:left:650"
-    "3:5:right:650"
+    "0:0:high:0"
+    "0:0:left:0"
+    "2:0:right:0"
 )
 
 echo "🚀 开始批量提交预处理任务..."
@@ -43,7 +27,7 @@ for TASK in "${TASKS[@]}"; do
     echo "➡️ 启动任务: [显卡 $GPU] 数据集=$DATASET | View=$VIEW | Min_Ep=$MIN_EP"
     
     # 执行 Python 脚本并放入后台
-    CUDA_VISIBLE_DEVICES=$GPU python scripts/preprocess_robocoin_2.py \
+    CUDA_VISIBLE_DEVICES=$GPU python scripts/preprocess_robocoin.py \
         --dataset_idx $DATASET \
         --view $VIEW \
         --min_episode $MIN_EP > "$LOG_FILE" 2>&1 &
