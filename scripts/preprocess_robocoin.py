@@ -23,8 +23,8 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 WINDOW_SIZE = 81
 STRIDE = 81
 VAL_PER_TASK = 2
-TRAIN_TARGET_PER_TASK = 5000
-TRAIN_OVERFLOW_MAX = 500
+TRAIN_TARGET_PER_TASK = 1000
+TRAIN_OVERFLOW_MAX = 200
 SEED = 42
 
 BASE_DIR = Path("/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320")
@@ -436,16 +436,16 @@ def main(skip_exist, dataset_idx, view, min_episode):
                 chunk_dir = [p for p in video_parts if "chunk-" in p][0]
                 ep_filename = Path(item["video"]).stem
                 
-                for view in video_views:
-                    track_view_name = view.replace("images", "tracks")
+                for video_view in video_views:
+                    track_view_name = video_view.replace("images", "tracks")
 
                     npz_save_dir = dataset_dir / TRACK_DIR_NAME / chunk_dir / track_view_name
                     npz_save_dir.mkdir(parents=True, exist_ok=True)
                     npz_save_path = npz_save_dir / f"{ep_filename}.npz"
                     
-                    actual_video_path = dataset_dir / VIDEO_DIR_NAME / chunk_dir / view / f"{ep_filename}.mp4"
+                    actual_video_path = dataset_dir / VIDEO_DIR_NAME / chunk_dir / video_view / f"{ep_filename}.mp4"
 
-                    video_path = f"{dataset_name}/{VIDEO_DIR_NAME}/{chunk_dir}/{view}/{ep_filename}.mp4"
+                    video_path = f"{dataset_name}/{VIDEO_DIR_NAME}/{chunk_dir}/{video_view}/{ep_filename}.mp4"
                     action_path = f"{dataset_name}/{ACTION_DIR_NAME}/{chunk_dir}/{ep_filename}.parquet"
                     track_path = f"{dataset_name}/{TRACK_DIR_NAME}/{chunk_dir}/{track_view_name}/{ep_filename}.npz"
 

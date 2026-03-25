@@ -26,7 +26,7 @@ val_freq: 5
 save_freq: 10
 clip_grad: 10.
 epochs: 1001
-seed: 0
+seed: 42
 dry: false
 
 model_name: TrackTransformerAction
@@ -34,17 +34,17 @@ p_img: 0.5
 lbd_track: 10.0
 lbd_img: 1.0
 
-# Model Capacity 0.1B
-# dim: 768
-# dim_head: null
-# heads: 8
-# depth: 16
-
-# Model Capacity 0.01B
-dim: 384
+# # Model Capacity 0.1B
+dim: 768
 dim_head: null
 heads: 8
-depth: 8
+depth: 16
+
+# Model Capacity 0.01B
+# dim: 384
+# dim_head: null
+# heads: 8
+# depth: 8
 
 img_size: [240, 320]
 frame_stack: 1
@@ -59,6 +59,7 @@ train_jsonl: ???
 val_jsonl: ???
 train_dataset_dir: ???
 val_dataset_dir: ???
+stat_path: ???
 
 optimizer_cfg:
   type: optim.Adam
@@ -103,3 +104,7 @@ dataset_cfg:
   cache_all: true
   cache_image: false
   cache_track: false
+  stat_path: ${stat_path}
+  norm_clip_min: -1.0
+  norm_clip_max: 1.0
+  norm_eps: 1e-6

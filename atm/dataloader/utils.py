@@ -6,9 +6,7 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 
-import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.tensor_utils as TensorUtils
-from robomimic.models.obs_core import CropRandomizer
+from atm.dataloader.robomimic_compat import CropRandomizer, join_dimensions, sample_random_image_crops
 
 
 def get_dataloader(replay, mode, num_workers, batch_size):
@@ -44,7 +42,7 @@ class CropRandomizerReturnCoords(CropRandomizer):
         inputs to [B * N, ...].
         """
         assert len(inputs.shape) >= 3 # must have at least (C, H, W) dimensions
-        out, crop_inds = ObsUtils.sample_random_image_crops(
+        out, crop_inds = sample_random_image_crops(
             images=inputs,
             crop_height=self.crop_height,
             crop_width=self.crop_width,
@@ -52,10 +50,10 @@ class CropRandomizerReturnCoords(CropRandomizer):
             pos_enc=self.pos_enc,
         )
         if return_crop_inds:
-            return TensorUtils.join_dimensions(out, 0, 1), crop_inds
+            return join_dimensions(out, 0, 1), crop_inds
         else:
             # [B, N, ...] -> [B * N, ...]
-            return TensorUtils.join_dimensions(out, 0, 1)
+            return join_dimensions(out, 0, 1)
 
 
 class ImgViewDiffTranslationAug(nn.Module):

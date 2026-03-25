@@ -2,11 +2,10 @@ import os
 import sys
 def debug_on():
     # 指定使用的 GPU ID
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
     batch_size = 8
     num_track_ids = 256
     sys.argv = [
@@ -15,12 +14,13 @@ def debug_on():
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         "train_gpus=[0]",
-        f"experiment=robocoin_track_transformer_001B_action_bs_{batch_size}_numtrack_{num_track_ids}_robocoin-object_ep1001",
+        f"experiment=robocoin_track_transformer_01B_action_bs_{batch_size}_numtrack_{num_track_ids}_robocoin-object_ep1001",
         "epochs=1001",
-        'train_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6/episodes_clipped_train.jsonl"',
-        'val_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6/episodes_clipped_val.jsonl"',
-        'train_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6"',
-        'val_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/tmp6"',
+        'train_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_train.jsonl"',
+        'val_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_val.jsonl"',
+        'train_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320"',
+        'val_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320"',
+        'stat_path="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/stat.json"',
     ]
 debug_on()
 

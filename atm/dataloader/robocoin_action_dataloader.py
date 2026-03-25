@@ -30,7 +30,11 @@ class RoboCoinATMActionDataset(Dataset):
                  augment_track=True,
                  views=None,
                  extra_state_keys=None,
-                 uniform_sample=False):
+                 uniform_sample=False,
+                 stat_path="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/stat.json",
+                 norm_clip_min=-1.0,
+                 norm_clip_max=1.0,
+                 norm_eps=1e-6):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.jsonl_path = jsonl_path
@@ -52,6 +56,10 @@ class RoboCoinATMActionDataset(Dataset):
         self.aug_prob = aug_prob
         self.augment_track = augment_track
         self.uniform_sample = uniform_sample
+        self.stat_path = stat_path
+        self.norm_clip_min = norm_clip_min
+        self.norm_clip_max = norm_clip_max
+        self.norm_eps = norm_eps
         
         # 视角和额外状态处理
         self.views = views
@@ -62,6 +70,8 @@ class RoboCoinATMActionDataset(Dataset):
         if not self.cache_all:
             assert not self.cache_image, "cache_image is only supported when cache_all is True."
             assert not self.cache_track, "cache_track is only supported when cache_all is True."
+
+        self._load_state_pose_stats()
 
         # 读取 JSONL 数据条目
         self.data_entries = self._load_jsonl(self.jsonl_path)
@@ -83,6 +93,91 @@ class RoboCoinATMActionDataset(Dataset):
         if self.cache_all:
             self._build_cache()
 
+    def _load_state_pose_stats(self):
+        with open(self.stat_path, "r", encoding="utf-8") as f:
+            stats = json.load(f)
+
+        assert "state_pose" in stats, f"Missing 'state_pose' in stat file: {self.stat_path}"
+        state_pose_stats = stats["state_pose"]
+        assert "p01" in state_pose_stats and "p99" in state_pose_stats, (
+            f"Missing 'p01' or 'p99' in state_pose stats: {self.stat_path}"
+        )
+
+        data_min = np.asarray(state_pose_stats["p01"], dtype=np.float32)
+        data_max = np.asarray(state_pose_stats["p99"], dtype=np.float32)
+
+        assert data_min.shape == (14,), f"Expected state_pose p01 shape (14,), got {data_min.shape}"
+        assert data_max.shape == (14,), f"Expected state_pose p99 shape (14,), got {data_max.shape}"
+        assert np.all(data_max >= data_min), "state_pose p99 should be greater than or equal to p01."
+
+        self.state_pose_min = torch.from_numpy(data_min)
+        self.state_pose_max = torch.from_numpy(data_max)
+
+    @staticmethod
+    def _reorder_state_pose(actions):
+        assert actions.shape[1] % 26 == 0, "Action dimension should be a multiple of 26 (pose + gripper)."
+        """
+        将action维度由
+            "names": [
+                "left_arm_joint_1_rad",
+                "left_arm_joint_2_rad",
+                "left_arm_joint_3_rad",
+                "left_arm_joint_4_rad",
+                "left_arm_joint_5_rad",
+                "left_arm_joint_6_rad",
+                "left_gripper_open",
+                "left_eef_pos_x_m",
+                "left_eef_pos_y_m",
+                "left_eef_pos_z_m",
+                "left_eef_rot_euler_x_rad",
+                "left_eef_rot_euler_y_rad",
+                "left_eef_rot_euler_z_rad",
+                "right_arm_joint_1_rad",
+                "right_arm_joint_2_rad",
+                "right_arm_joint_3_rad",
+                "right_arm_joint_4_rad",
+                "right_arm_joint_5_rad",
+                "right_arm_joint_6_rad",
+                "right_gripper_open",
+                "right_eef_pos_x_m",
+                "right_eef_pos_y_m",
+                "right_eef_pos_z_m",
+                "right_eef_rot_euler_x_rad",
+                "right_eef_rot_euler_y_rad",
+                "right_eef_rot_euler_z_rad"
+            ]
+        转换为[
+                "left_eef_pos_x_m",
+                "left_eef_pos_y_m",
+                "left_eef_pos_z_m",
+                "left_eef_rot_euler_x_rad",
+                "left_eef_rot_euler_y_rad",
+                "left_eef_rot_euler_z_rad",
+                "left_gripper_open",
+                "right_eef_pos_x_m",
+                "right_eef_pos_y_m",
+                "right_eef_pos_z_m",
+                "right_eef_rot_euler_x_rad",
+                "right_eef_rot_euler_y_rad",
+                "right_eef_rot_euler_z_rad",
+                "right_gripper_open",
+        ]
+        """
+        actions = torch.cat([
+            actions[:, 7:13],  # left eef pos + rot
+            actions[:, 6:7],   # left gripper
+            actions[:, 20:26], # right eef pos + rot
+            actions[:, 19:20], # right gripper
+        ], dim=1)
+        assert actions.shape[1] == 14, "After reordering, action dimension should be 14."
+        return actions
+
+    def _normalize_state_pose(self, actions):
+        data_min = self.state_pose_min.to(dtype=actions.dtype, device=actions.device)
+        data_max = self.state_pose_max.to(dtype=actions.dtype, device=actions.device)
+        ndata = 2 * (actions - data_min) / (data_max - data_min + self.norm_eps) - 1.0
+        return torch.clamp(ndata, min=self.norm_clip_min, max=self.norm_clip_max)
+
     def _load_jsonl(self, path):
         entries = []
         with open(path, 'r', encoding='utf-8') as f:
@@ -98,7 +193,7 @@ class RoboCoinATMActionDataset(Dataset):
             task_embed_path = os.path.join(self.dataset_dir, entry["prompt_embed_bert"])
 
             # 默认缓存极小的数据：相对动作和文本特征
-            cache_dict['actions'] = np.stack(pd.read_parquet(action_path)['action'].values)
+            cache_dict['actions'] = np.stack(pd.read_parquet(action_path)['observation.state'].values)
             cache_dict['task_emb'] = torch.load(task_embed_path, map_location="cpu")
 
             # 按需缓存 Track
@@ -158,11 +253,13 @@ class RoboCoinATMActionDataset(Dataset):
             actions_all = self._cache[index]['actions']
             task_emb = self._cache[index]['task_emb']
         else:
-            actions_all = np.stack(pd.read_parquet(os.path.join(self.dataset_dir, entry["action"]))['action'].values)
+            actions_all = np.stack(pd.read_parquet(os.path.join(self.dataset_dir, entry["action"]))['observation.state'].values)
             task_emb = torch.load(os.path.join(self.dataset_dir, entry["prompt_embed_bert"]), map_location="cpu")
             
         end_idx = min(start_frame + self.num_track_ts, len(actions_all))
         actions = torch.from_numpy(actions_all[start_frame:end_idx]).float()
+        actions = self._reorder_state_pose(actions)
+        actions = self._normalize_state_pose(actions)
 
         # --- 3. 读取 Tracks 和 Vis ---
         if self.cache_all and self.cache_track:
@@ -181,66 +278,9 @@ class RoboCoinATMActionDataset(Dataset):
         if pad_len > 0:
             tracks = torch.cat([tracks, tracks[-1:].repeat(pad_len, 1, 1)], dim=0)
             vis = torch.cat([vis, vis[-1:].repeat(pad_len, 1)], dim=0)
-            
-            zero_action = torch.zeros_like(actions[-1:])
-            actions = torch.cat([actions, zero_action.repeat(pad_len, 1)], dim=0)
-        
-        # Action维度转换
-        assert actions.shape[1] % 26 == 0, "Action dimension should be a multiple of 26 (pose + gripper)."
-        """
-        将action维度由
-            "names": [
-                "left_arm_joint_1_rad",
-                "left_arm_joint_2_rad",
-                "left_arm_joint_3_rad",
-                "left_arm_joint_4_rad",
-                "left_arm_joint_5_rad",
-                "left_arm_joint_6_rad",
-                "left_gripper_open",
-                "left_eef_pos_x_m",
-                "left_eef_pos_y_m",
-                "left_eef_pos_z_m",
-                "left_eef_rot_euler_x_rad",
-                "left_eef_rot_euler_y_rad",
-                "left_eef_rot_euler_z_rad",
-                "right_arm_joint_1_rad",
-                "right_arm_joint_2_rad",
-                "right_arm_joint_3_rad",
-                "right_arm_joint_4_rad",
-                "right_arm_joint_5_rad",
-                "right_arm_joint_6_rad",
-                "right_gripper_open",
-                "right_eef_pos_x_m",
-                "right_eef_pos_y_m",
-                "right_eef_pos_z_m",
-                "right_eef_rot_euler_x_rad",
-                "right_eef_rot_euler_y_rad",
-                "right_eef_rot_euler_z_rad"
-            ]
-        转换为[
-                "left_eef_pos_x_m",
-                "left_eef_pos_y_m",
-                "left_eef_pos_z_m",
-                "left_eef_rot_euler_x_rad",
-                "left_eef_rot_euler_y_rad",
-                "left_eef_rot_euler_z_rad",
-                "left_gripper_open",
-                "right_eef_pos_x_m",
-                "right_eef_pos_y_m",
-                "right_eef_pos_z_m",
-                "right_eef_rot_euler_x_rad",
-                "right_eef_rot_euler_y_rad",
-                "right_eef_rot_euler_z_rad",
-                "right_gripper_open",
-        ]
-        """
-        actions = torch.cat([
-            actions[:, 7:13],  # left eef pos + rot
-            actions[:, 6:7],   # left gripper
-            actions[:, 20:26], # right eef pos + rot
-            actions[:, 19:20], # right gripper
-        ], dim=1)
-        assert actions.shape[1] == 14, "After reordering, action dimension should be 14."
+
+            zero_action = torch.zeros((pad_len, actions.shape[1]), dtype=actions.dtype, device=actions.device)
+            actions = torch.cat([actions, zero_action], dim=0)
 
         # --- 5. 数据增强与采样 ---
         if np.random.rand() < self.aug_prob:
