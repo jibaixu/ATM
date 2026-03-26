@@ -2,7 +2,7 @@ import os
 import sys
 def debug_on():
     # 指定使用的 GPU ID
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,7 +14,7 @@ def debug_on():
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         "train_gpus=[0]",
-        f"experiment=robocoin_track_transformer_01B_action_bs_{batch_size}_numtrack_{num_track_ids}_robocoin-object_ep1001",
+        f"experiment=robocoin_track_transformer_001B_action_bs_{batch_size}_numtrack_{num_track_ids}_robocoin-object_ep1001",
         "epochs=1001",
         'train_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_train.jsonl"',
         'val_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_val.jsonl"',
@@ -166,8 +166,8 @@ def run_one_epoch(fabric,
     model.train()
     i = 0
     for vid, track, vis, task_emb, action in tqdm(dataloader):
-        if mix_precision:
-            vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
+        # if mix_precision:
+        #     vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
         b, t, c, h, w = vid.shape
         b, tl, n, _ = track.shape
         b, tl, n = vis.shape
@@ -212,8 +212,8 @@ def evaluate(model, dataloader, lbd_track, lbd_img, p_img, mix_precision=False, 
     i = 0
     for vid, track, vis, task_emb, action in tqdm(dataloader):
         vid, track, vis, task_emb, action = vid.cuda(), track.cuda(), vis.cuda(), task_emb.cuda(), action.cuda()
-        if mix_precision:
-            vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
+        # if mix_precision:
+        #     vid, track, vis, task_emb, action = vid.bfloat16(), track.bfloat16(), vis.bfloat16(), task_emb.bfloat16(), action.bfloat16()
         b, t, c, h, w = vid.shape
         b, tl, n, _ = track.shape
 
@@ -249,8 +249,8 @@ def visualize(model, dataloader, mix_precision=False):
 
     for i, (vid, track, vis, task_emb, action) in enumerate(dataloader):
         vid, track, task_emb, action = vid.cuda(), track.cuda(), task_emb.cuda(), action.cuda()
-        if mix_precision:
-            vid, track, task_emb, action = vid.bfloat16(), track.bfloat16(), task_emb.bfloat16(), action.bfloat16()
+        # if mix_precision:
+        #     vid, track, task_emb, action = vid.bfloat16(), track.bfloat16(), task_emb.bfloat16(), action.bfloat16()
         _, eval_dict = model.forward_vis(vid, track, task_emb, p_img=0, action=action)
         if keep_eval_dict is None or torch.rand(1) < 0.1:
             keep_eval_dict = eval_dict

@@ -45,7 +45,7 @@ class TrackTransformerAction(nn.Module):
             nn.SiLU(),
             nn.Linear(dim, dim),
         )
-        self.action_pos_embed = nn.Parameter(torch.randn(1, track_cfg.num_track_ts, dim))
+        self.action_pos_embed = nn.Parameter(torch.randn(1, track_cfg.num_track_ts, dim) * 0.02)
         # kaiming initialization
         nn.init.kaiming_normal_(self.action_encoder[0].weight, mode='fan_in', nonlinearity='relu')
         nn.init.kaiming_normal_(self.action_encoder[2].weight, mode='fan_in', nonlinearity='relu')
@@ -116,9 +116,9 @@ class TrackTransformerAction(nn.Module):
         """
         num_track_t = self.num_track_ts // self.track_patch_size
 
-        self.track_embed = nn.Parameter(torch.randn(1, num_track_t, 1, dim), requires_grad=True)
-        self.img_embed = nn.Parameter(torch.randn(1, num_img_patches, dim), requires_grad=False)
-        self.mask_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.track_embed = nn.Parameter(torch.randn(1, num_track_t, 1, dim) * 0.02, requires_grad=True)
+        self.img_embed = nn.Parameter(torch.randn(1, num_img_patches, dim) * 0.02, requires_grad=False)
+        self.mask_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
 
         track_embed = get_1d_sincos_pos_embed(dim, num_track_t)
         track_embed = rearrange(track_embed, 't d -> () t () d')
@@ -131,18 +131,33 @@ class TrackTransformerAction(nn.Module):
 
         print(f"num_track_patches: {self.num_track_patches}, num_img_patches: {num_img_patches}, total: {self.num_track_patches + num_img_patches}")
 
+    def _get_module_dtype(self, module):
+        for param in module.parameters():
+            if param.is_floating_point():
+                return param.dtype
+        return None
+
+    def _align_tensor_dtype(self, tensor, module):
+        if tensor is None or not torch.is_tensor(tensor) or not tensor.is_floating_point():
+            return tensor
+
+        target_dtype = self._get_module_dtype(module)
+        if target_dtype is None or tensor.dtype == target_dtype:
+            return tensor
+        return tensor.to(dtype=target_dtype)
+
     def _preprocess_track(self, track):
-        return track
+        return self._align_tensor_dtype(track, self.track_proj_encoder)
 
     def _preprocess_vis(self, vis):
-        return vis
+        return self._align_tensor_dtype(vis, self.track_proj_encoder)
 
     def _preprocess_vid(self, vid):
         assert torch.max(vid) >= 2
 
         vid = vid[:, -self.frame_stack:]
         vid = self.img_normalizer(vid / 255.)
-        return vid
+        return self._align_tensor_dtype(vid, self.img_proj_encoder)
 
     def _encode_track(self, track):
         """
@@ -152,7 +167,7 @@ class TrackTransformerAction(nn.Module):
         track = self._mask_track_as_first(track)  # b, t, n, d. track embedding is 1, t, 1, d
         track = self.track_proj_encoder(track)
 
-        track = track + self.track_embed
+        track = track + self.track_embed.to(device=track.device, dtype=track.dtype)
         track = rearrange(track, 'b t n d -> b (t n) d')
         return track
 
@@ -163,7 +178,7 @@ class TrackTransformerAction(nn.Module):
         vid = rearrange(vid, "b t c h w -> b (t c) h w")
         patches = self.img_proj_encoder(vid)  # b, n, d
         patches = self._mask_patches(patches, p=p)
-        patches = patches + self.img_embed
+        patches = patches + self.img_embed.to(device=patches.device, dtype=patches.dtype)
 
         return patches
     
@@ -176,7 +191,10 @@ class TrackTransformerAction(nn.Module):
         # 线性投影到模型维度
         action_embeds = self.action_encoder(action) # (b, 16, 384)
         # 加上动作特定的位置编码
-        action_embeds = action_embeds + self.action_pos_embed
+        action_embeds = action_embeds + self.action_pos_embed.to(
+            device=action_embeds.device,
+            dtype=action_embeds.dtype,
+        )
         return action_embeds
 
     def _mask_patches(self, patches, p):
@@ -186,7 +204,10 @@ class TrackTransformerAction(nn.Module):
         b, n, _ = patches.shape
         mask = torch.rand(b, n, device=patches.device) < p
         masked_patches = patches.clone()
-        masked_patches[mask] = self.mask_token
+        masked_patches[mask] = self.mask_token.to(
+            device=masked_patches.device,
+            dtype=masked_patches.dtype,
+        )
         return masked_patches
 
     def _mask_track_as_first(self, track):
@@ -205,6 +226,8 @@ class TrackTransformerAction(nn.Module):
         """
         assert torch.max(vid) <=1.
         B, T, _, _ = track.shape
+        task_emb = self._align_tensor_dtype(task_emb, self.language_encoder)
+        action = self._align_tensor_dtype(action, self.action_encoder)
         patches = self._encode_video(vid, p_img)  # (b, n_image, d)
         enc_track = self._encode_track(track)
         #! 新增：处理动作编码

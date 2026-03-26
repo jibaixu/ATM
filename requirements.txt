@@ -1,3 +1,4 @@
+accelerate
 deepspeed==0.18.5
 mujoco==3.4.0
 numpy==1.26.4

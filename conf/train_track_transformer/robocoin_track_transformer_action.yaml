@@ -15,19 +15,49 @@ wandb:
   name: ${now:%m%d}_${experiment}_${now:%H%M}_${hydra:job.num}
   group: ${experiment}
 
-train_gpus: [0]
+train_gpus: [0] # deprecated for this script; use `accelerate launch --num_processes ...`
+distributed:
+  backend: deepspeed
+  zero_stage: 2
+  offload_optimizer_device: none
+  offload_param_device: none
 
 # Training
 lr: 1e-4
 batch_size: ???
+gradient_accumulation_steps: 4
 mix_precision: true
 num_workers: 8
 val_freq: 5
 save_freq: 10
-clip_grad: 10.
+clip_grad: 2.
 epochs: 1001
 seed: 42
 dry: false
+
+debug:
+  enable: true
+  check_inputs_every_n_steps: 1
+  log_stats_every_n_steps: 50
+  check_params_every_n_steps: 1
+  fail_on_nonfinite: true
+  fail_on_large_loss: true
+  loss_threshold: 1e4
+  fail_on_large_grad_norm: true
+  grad_norm_threshold: 1e4
+  fail_on_large_param_absmax: false
+  param_absmax_threshold: 1e4
+  detect_anomaly: false
+  save_snapshot_on_error: true
+  preview_items: 16
+  topk_items: 8
+  input_thresholds:
+    vid_abs_max: 512.0
+    track_abs_max: null
+    action_abs_max: 5.0
+    task_emb_abs_max: 1e3
+    vis_min: -1e-3
+    vis_max: 1.001
 
 model_name: TrackTransformerAction
 p_img: 0.5
@@ -35,16 +65,16 @@ lbd_track: 10.0
 lbd_img: 1.0
 
 # # Model Capacity 0.1B
-dim: 768
-dim_head: null
-heads: 8
-depth: 16
-
-# Model Capacity 0.01B
-# dim: 384
+# dim: 768
 # dim_head: null
 # heads: 8
-# depth: 8
+# depth: 16
+
+# Model Capacity 0.01B
+dim: 384
+dim_head: null
+heads: 8
+depth: 8
 
 img_size: [240, 320]
 frame_stack: 1
