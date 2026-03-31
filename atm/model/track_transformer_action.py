@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 from timm.models.vision_transformer import PatchEmbed
 from torch import nn
 
-from atm.utils.flow_utils import ImageUnNormalize, tracks_to_video
+from atm.utils.flow_utils import ImageUnNormalize, draw_tracks_on_single_image
 from atm.utils.pos_embed_utils import get_1d_sincos_pos_embed, get_2d_sincos_pos_embed
 from atm.policy.vilt_modules.language_modules import *
 from .track_patch_embed import TrackPatchEmbed
@@ -328,24 +328,27 @@ class TrackTransformerAction(nn.Module):
         combined_image = torch.clamp(combined_image, 0, 255)
         combined_image = rearrange(combined_image, '1 c h w -> h w c')
 
-        track = track.clone()
-        rec_track = rec_track.clone()
-
-        rec_track_vid = tracks_to_video(rec_track, img_size=H)
-        track_vid = tracks_to_video(track, img_size=H)
-
-        combined_track_vid = torch.cat([track_vid, rec_track_vid], dim=-1)
-
-        _vid = torch.cat([_vid, _vid], dim=-1)
-        combined_track_vid = _vid * .50 + combined_track_vid * .50
-        combined_track_vid = rearrange(combined_track_vid, '1 1 c h w -> h w c')
+        raw_frame = rearrange(_vid[:, -1], '1 c h w -> h w c').cpu().numpy().astype(np.uint8)
+        track_img = draw_tracks_on_single_image(
+            track,
+            raw_frame,
+            img_size=(H, W),
+            tracks_leave_trace=min(15, track.shape[1] - 1),
+        )
+        rec_track_img = draw_tracks_on_single_image(
+            rec_track,
+            raw_frame,
+            img_size=(H, W),
+            tracks_leave_trace=min(15, rec_track.shape[1] - 1),
+        )
+        combined_track_vid = np.concatenate([track_img, rec_track_img], axis=1)
 
         ret_dict = {
             "loss": loss.sum().item(),
             "track_loss": track_loss.sum().item(),
             "img_loss": img_loss.sum().item(),
             "combined_image": combined_image.cpu().numpy().astype(np.uint8),
-            "combined_track_vid": combined_track_vid.cpu().numpy().astype(np.uint8),
+            "combined_track_vid": combined_track_vid.astype(np.uint8),
         }
 
         return loss.sum(), ret_dict

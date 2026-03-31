@@ -1,5 +1,7 @@
 import json
 import os
+# import sys
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import numpy as np
 import pandas as pd
 import torch
@@ -227,6 +229,7 @@ class RoboCoinATMActionDataset(Dataset):
             vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
             all_frames = vr
 
+        #! frame_stack 表示取从当前帧 start_frame 开始到之前的连续帧数，但track永远都只选取 start_frame 处的查询点处开始的轨迹
         img_start_idx = max(start_frame + 1 - self.frame_stack, 0)
         img_end_idx = start_frame + 1
         
@@ -245,7 +248,7 @@ class RoboCoinATMActionDataset(Dataset):
             padding_frames = torch.zeros((self.frame_stack - len(frames), *frames.shape[1:]))
             frames = torch.cat([padding_frames, frames], dim=0)
 
-        if frames.shape[2:] != self.img_size:
+        if list(frames.shape[2:]) != self.img_size:
             frames = F.interpolate(frames, size=self.img_size, mode="bilinear", align_corners=False)
 
         # --- 2. 读取 Actions 和 Task Emb ---
@@ -296,3 +299,31 @@ class RoboCoinATMActionDataset(Dataset):
             tracks, vis = sample_tracks_visible_first(tracks, vis, num_samples=self.num_track_ids)
 
         return frames, tracks, vis, task_emb, actions
+
+
+if __name__ == "__main__":
+    dataset = RoboCoinATMActionDataset(
+        jsonl_path="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_train_test.jsonl",
+        dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320",
+        img_size=[240, 320],
+        frame_stack=1, 
+        num_track_ts=81,
+        num_track_ids=256,
+        cache_all=True,
+        cache_image=False,
+        cache_track=False,
+        stat_path="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/stat.json",
+        norm_clip_min=-1.0,
+        norm_clip_max=1.0,
+        norm_eps=1e-6,
+        aug_prob=0.9,
+    )
+
+    for i in range(len(dataset)):
+        frames, tracks, vis, task_emb, actions = dataset[i]
+        print(f"Sample {i}:")
+        print(f"  Frames shape: {frames.shape}")
+        print(f"  Tracks shape: {tracks.shape}")
+        print(f"  Vis shape: {vis.shape}")
+        print(f"  Task Emb shape: {task_emb.shape}")
+        print(f"  Actions shape: {actions.shape}")

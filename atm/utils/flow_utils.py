@@ -198,28 +198,58 @@ def sample_tracks_nearest_to_grids(tracks, vis, num_samples):
     return nearest_tracks, nearest_vis
 
 
+def _normalize_img_size(img_size):
+    if isinstance(img_size, int):
+        raise TypeError(
+            "img_size must be an explicit (H, W) pair, for example (240, 320). "
+            "Passing a single int is not supported."
+        )
+    if isinstance(img_size, torch.Tensor):
+        raise TypeError(
+            "img_size must be an explicit (H, W) pair, not a tensor."
+        )
+    if not isinstance(img_size, (tuple, list)) or len(img_size) != 2:
+        raise TypeError(
+            "img_size must be an explicit (H, W) pair, for example (240, 320)."
+        )
+
+    height = int(img_size[0])
+    width = int(img_size[1])
+    if height <= 0 or width <= 0:
+        raise ValueError(f"img_size values must be positive, got {img_size}.")
+    return height, width
+
+
 def tracks_to_binary_img(tracks, img_size):
     """
     tracks: (B, T, N, 2), where each track is a sequence of (u, v) coordinates; u is width, v is height
+    img_size: (H, W)
     return: (B, T, C, H, W)
     """
-    from einops import repeat
     B, T, N, C = tracks.shape
-    generation_size = 128
-    H, W = generation_size, generation_size
+    target_h, target_w = _normalize_img_size(img_size)
 
-    tracks = tracks * generation_size
-    u, v = tracks[:, :, :, 0].long(), tracks[:, :, :, 1].long()
-    u = torch.clamp(u, 0, W - 1)
-    v = torch.clamp(v, 0, H - 1)
-    uv = u + v * W
+    generation_long_side = 128
+    if target_h >= target_w:
+        generation_h = generation_long_side
+        generation_w = max(1, round(generation_long_side * target_w / target_h))
+    else:
+        generation_w = generation_long_side
+        generation_h = max(1, round(generation_long_side * target_h / target_w))
 
-    img = torch.zeros(B, T, H * W).to(tracks.device)
-    img = img.scatter(2, uv, 1).view(B, T, H, W)
+    scaled_tracks = tracks.clone()
+    scaled_tracks[:, :, :, 0] = scaled_tracks[:, :, :, 0] * generation_w
+    scaled_tracks[:, :, :, 1] = scaled_tracks[:, :, :, 1] * generation_h
+    u, v = scaled_tracks[:, :, :, 0].long(), scaled_tracks[:, :, :, 1].long()
+    u = torch.clamp(u, 0, generation_w - 1)
+    v = torch.clamp(v, 0, generation_h - 1)
+    uv = u + v * generation_w
+
+    img = torch.zeros(B, T, generation_h * generation_w, device=tracks.device)
+    img = img.scatter(2, uv, 1).view(B, T, generation_h, generation_w)
 
     # img size is b x t x h x w
     img = repeat(img, 'b t h w -> (b t) h w')[:, None, :, :]
-    import torch.nn.functional as F
     #! Generate 5x5 gaussian kernel
     # kernel = [[0.003765, 0.015019, 0.023792, 0.015019, 0.003765],
     #           [0.015019, 0.059912, 0.094907, 0.059912, 0.015019],
@@ -239,10 +269,10 @@ def tracks_to_binary_img(tracks, img_size):
     img = F.conv2d(img, kernel, padding=1)[:, 0, :, :]
 
     img = rearrange(img, '(b t) h w -> b t h w', b=B)
-    if generation_size != img_size:
-        img = F.interpolate(img, size=(img_size, img_size), mode="bicubic")
+    if (generation_h, generation_w) != (target_h, target_w):
+        img = F.interpolate(img, size=(target_h, target_w), mode="bicubic")
     img = torch.clamp(img, 0, 1)
-    img = torch.where(img < 0.05, torch.tensor(0.0), img)
+    img = torch.where(img < 0.05, torch.zeros_like(img), img)
 
     img = repeat(img, 'b t h w -> b t c h w', c=3)
 
@@ -253,6 +283,7 @@ def tracks_to_binary_img(tracks, img_size):
 def tracks_to_video(tracks, img_size):
     """
     tracks: (B, T, N, 2), where each track is a sequence of (u, v) coordinates; u is width, v is height
+    img_size: (H, W)
     return: (B, C, H, W)
     """
     B, T, N, _ = tracks.shape
@@ -262,7 +293,7 @@ def tracks_to_video(tracks, img_size):
 
     # Get blue to purple cmap
     cmap = plt.get_cmap('coolwarm')
-    cmap = cmap(1 / np.arange(T))[:T, :3][::-1]
+    cmap = cmap(np.linspace(0.0, 1.0, T))[:T, :3]
     binary_vid = binary_vid.clone()
 
     for l in range(T):
@@ -275,13 +306,121 @@ def tracks_to_video(tracks, img_size):
     track_vid[track_vid > 255] = 255
     return track_vid
 
+
+def _compute_track_colors(tracks_px, color_map_name="gist_rainbow", query_frame=0):
+    _, _, num_tracks, _ = tracks_px.shape
+    color_map = cm.get_cmap(color_map_name)
+    vector_colors = np.zeros((num_tracks, 3), dtype=np.float32)
+
+    y_coords = tracks_px[0, query_frame, :, 1]
+    y_min = float(y_coords.min())
+    y_max = float(y_coords.max())
+    if abs(y_max - y_min) < 1e-6:
+        normalized = np.full((num_tracks,), 0.5, dtype=np.float32)
+    else:
+        normalized = (y_coords - y_min) / (y_max - y_min)
+
+    for track_idx in range(num_tracks):
+        vector_colors[track_idx] = np.array(color_map(float(normalized[track_idx]))[:3]) * 255.0
+    return vector_colors
+
+
+def draw_tracks_on_single_image(
+    tracks: torch.Tensor,
+    image,
+    img_size,
+    tracks_leave_trace=15,
+    linewidth=None,
+    point_radius=None,
+    point_outline=1,
+    color_map_name="gist_rainbow",
+):
+    """
+    tracks: (B, T, N, 2), normalized to [0, 1]
+    image: (H, W, 3), (C, H, W), or batched with B=1
+    img_size: (H, W)
+    return: (H, W, 3) uint8
+    """
+    height, width = _normalize_img_size(img_size)
+    if tracks.shape[0] != 1:
+        raise ValueError("draw_tracks_on_single_image only supports batch size 1.")
+
+    if torch.is_tensor(image):
+        image_np = image.detach().cpu().numpy()
+    else:
+        image_np = np.asarray(image)
+
+    if image_np.ndim == 4:
+        if image_np.shape[0] != 1:
+            raise ValueError("draw_tracks_on_single_image only supports batch size 1.")
+        image_np = image_np[0]
+    if image_np.ndim != 3:
+        raise ValueError(f"Expected image with 3 dims, got shape {image_np.shape}.")
+
+    if image_np.shape[0] == 3 and image_np.shape[-1] != 3:
+        image_np = rearrange(image_np, "c h w -> h w c")
+    if image_np.shape[-1] != 3:
+        raise ValueError(f"Expected RGB image, got shape {image_np.shape}.")
+
+    canvas = image_np.astype(np.uint8).copy()
+    tracks_px = tracks.detach().float().cpu().clone()
+    tracks_px[:, :, :, 0] = torch.clamp(tracks_px[:, :, :, 0] * width, 0, width - 1)
+    tracks_px[:, :, :, 1] = torch.clamp(tracks_px[:, :, :, 1] * height, 0, height - 1)
+    tracks_px = tracks_px.numpy()
+
+    _, num_steps, num_tracks, _ = tracks_px.shape
+    colors = _compute_track_colors(tracks_px, color_map_name=color_map_name)
+
+    if linewidth is None:
+        linewidth = max(int(round(min(height, width) / 160.0)), 2)
+    if point_radius is None:
+        point_radius = max(linewidth + 1, int(round(min(height, width) / 120.0)))
+
+    end_idx = num_steps - 1
+    start_idx = max(0, end_idx - tracks_leave_trace) if tracks_leave_trace >= 0 else 0
+
+    # Draw older segments first and keep newer ones more visible.
+    for step_idx in range(start_idx, end_idx):
+        age = step_idx - start_idx + 1
+        alpha = min(0.85, 0.20 + 0.65 * (age / max(1, end_idx - start_idx)))
+        base = canvas.copy()
+        for track_idx in range(num_tracks):
+            pt1 = tracks_px[0, step_idx, track_idx]
+            pt2 = tracks_px[0, step_idx + 1, track_idx]
+            p1 = (int(pt1[0]), int(pt1[1]))
+            p2 = (int(pt2[0]), int(pt2[1]))
+            if p1[0] == 0 and p1[1] == 0:
+                continue
+            cv2.line(
+                canvas,
+                p1,
+                p2,
+                colors[track_idx].tolist(),
+                linewidth,
+                cv2.LINE_AA,
+            )
+        canvas = cv2.addWeighted(canvas, alpha, base, 1 - alpha, 0)
+
+    # Emphasize the current point with a light outline and solid center.
+    for track_idx in range(num_tracks):
+        point = tracks_px[0, end_idx, track_idx]
+        center = (int(point[0]), int(point[1]))
+        if center[0] == 0 and center[1] == 0:
+            continue
+        if point_outline > 0:
+            cv2.circle(canvas, center, point_radius + point_outline, (245, 245, 245), -1, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, center, point_radius, colors[track_idx].tolist(), -1, lineType=cv2.LINE_AA)
+
+    return canvas
+
+
 def combine_track_and_img(track: torch.Tensor, vid: np.ndarray):
     """
     track: [B, T, N, 2]
     vid: [B, C, H, W]
     return: (B, C, H, W)
     """
-    img_size = vid.shape[-1]
+    img_size = (vid.shape[-2], vid.shape[-1])
     track_video = tracks_to_video(track, img_size)  # B 3 H W
     track_video = track_video.detach().cpu().numpy()
     vid = vid.copy().astype(np.float32)
@@ -302,8 +441,9 @@ def draw_traj_on_images(tracks: torch.Tensor, images: np.ndarray, show_dots=Fals
     images_back = rearrange(images_back, "b c h w -> b h w c")
     images_back = images_back.copy()
 
-    tracks[:, :, :, 0] = torch.clamp(tracks[:, :, :, 0] * h, 0, h-1)
-    tracks[:, :, :, 1] = torch.clamp(tracks[:, :, :, 1] * w, 0, w-1)
+    tracks = tracks.clone()
+    tracks[:, :, :, 0] = torch.clamp(tracks[:, :, :, 0] * w, 0, w - 1)
+    tracks[:, :, :, 1] = torch.clamp(tracks[:, :, :, 1] * h, 0, h - 1)
 
     color_map = cm.get_cmap("cool")
     linewidth = max(int(5 * h / 512), 1)
@@ -323,7 +463,7 @@ def draw_traj_on_images(tracks: torch.Tensor, images: np.ndarray, show_dots=Fals
                     thickness=linewidth,
                     lineType=cv2.LINE_AA)
                 if show_dots:
-                    cv2.circle(img, (traj[s, 0], traj[s, 1]), linewidth, color, -1)
+                    cv2.circle(img, (int(traj[s, 0]), int(traj[s, 1])), linewidth, color, -1)
         result_images.append(img)
 
     result_images = np.stack(result_images, dtype=np.uint8)

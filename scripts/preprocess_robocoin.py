@@ -22,14 +22,14 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 # --- 切分与数据量常量设置 ---
 WINDOW_SIZE = 81
 STRIDE = 81
-VAL_PER_TASK = 2
-TRAIN_TARGET_PER_TASK = 1000
-TRAIN_OVERFLOW_MAX = 200
+VAL_PER_TASK = 1
+TRAIN_TARGET_PER_TASK = 100
+TRAIN_OVERFLOW_MAX = 50
 SEED = 42
 
 BASE_DIR = Path("/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320")
-TRAIN_OUTPUT_PATH = BASE_DIR / "episodes_clipped_train.jsonl"
-VAL_OUTPUT_PATH = BASE_DIR / "episodes_clipped_val.jsonl"
+TRAIN_OUTPUT_PATH = BASE_DIR / "episodes_clipped_train_test.jsonl"
+VAL_OUTPUT_PATH = BASE_DIR / "episodes_clipped_val_test.jsonl"
 
 VIDEO_DIR_NAME = "videos_clipped"
 ACTION_DIR_NAME = "data_clipped"
