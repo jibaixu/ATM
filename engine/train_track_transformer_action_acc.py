@@ -10,13 +10,13 @@ if PROJECT_ROOT not in sys.path:
 
 """
 #! 使用Accelerate进行多卡训练时, torch 2.7.1+cu128对应需要修改nvidia-nccl-cu12==2.26.5, 否则会导致NCCL错误
-accelerate launch --num_processes 2 --main_process_port 29500 --gpu_ids 2,3 -m engine.train_track_transformer_action_acc
+accelerate launch --num_processes 4 --main_process_port 29500 --gpu_ids 0,1,2,3 -m engine.train_track_transformer_action_acc
 """
 def debug_on():
     # 指定使用的 GPU ID
     # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
-    batch_size = 8
+    batch_size = 16
     num_track_ids = 256
     gradient_accumulation_steps = 4
     sys.argv = [
@@ -25,13 +25,14 @@ def debug_on():
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         f"gradient_accumulation_steps={gradient_accumulation_steps}",
-        f"experiment=robocoin_track_transformer_001B_action_bs_{batch_size}_grad_acc_{gradient_accumulation_steps}_numtrack_{num_track_ids}_robocoin-object_ep1001",
+        f"experiment=realbot_track_transformer_001B_action_bs_{batch_size}_grad_acc_{gradient_accumulation_steps}_numtrack_{num_track_ids}_ep1001",
         "epochs=1001",
-        'train_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_train_4w.jsonl"',
-        'val_jsonl="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/episodes_clipped_val_4w.jsonl"',
-        'train_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320"',
-        'val_dataset_dir="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320"',
-        'stat_path="/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320/stat.json"',
+        'train_jsonl="/data_jbx/Datasets/Realbot/episodes_train_realbot.jsonl"',
+        'val_jsonl="/data_jbx/Datasets/Realbot/episodes_val_realbot.jsonl"',
+        'train_dataset_dir="/data_jbx/Datasets/Realbot"',
+        'val_dataset_dir="/data_jbx/Datasets/Realbot"',
+        'stat_path="/data_jbx/Datasets/Realbot/4_4_four_tasks_wan/meta/stat.json"',
+        'model_load_path="/data_jbx/Codes/ATM/results/track_transformer/RoboCoin_Pretrain_Track_Action_Transformer/model_best.ckpt"',
     ]
 debug_on()
 
@@ -41,7 +42,7 @@ import wandb
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.utils import set_seed
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tqdm import tqdm
 
 from atm.dataloader import RoboCoinATMActionDataset, get_dataloader
@@ -74,6 +75,33 @@ def _get_runtime_config(cfg: DictConfig):
         "offload_optimizer_device": _cfg_get(distributed_cfg, "offload_optimizer_device", "none"),
         "offload_param_device": _cfg_get(distributed_cfg, "offload_param_device", "none"),
     }
+
+
+def _resolve_optional_path(path):
+    if path is None:
+        return None
+
+    resolved_path = str(path).strip()
+    if not resolved_path:
+        return None
+
+    resolved_path = os.path.expanduser(resolved_path)
+    return hydra.utils.to_absolute_path(resolved_path)
+
+
+def _prepare_model_load_path(cfg: DictConfig):
+    load_path = _cfg_get(cfg.get("model_cfg"), "load_path", None)
+    resolved_path = _resolve_optional_path(load_path)
+    if resolved_path is None:
+        return None
+
+    if not os.path.isfile(resolved_path):
+        raise FileNotFoundError(f"Pretrained checkpoint not found: {resolved_path}")
+
+    with open_dict(cfg.model_cfg):
+        cfg.model_cfg.load_path = resolved_path
+
+    return resolved_path
 
 
 ############### 2. Accelerator 多卡训练辅助函数 ###############
@@ -215,6 +243,7 @@ def main(cfg: DictConfig):
     work_dir = HydraConfig.get().runtime.output_dir
     setup(cfg)
     runtime_cfg = _get_runtime_config(cfg)
+    model_load_path = _prepare_model_load_path(cfg)
 
     accelerator = _make_accelerator(cfg)
     setup_for_distributed(accelerator.is_main_process)
@@ -227,6 +256,8 @@ def main(cfg: DictConfig):
             f"mixed_precision={runtime_cfg['mixed_precision']}, "
             f"gradient_accumulation_steps={runtime_cfg['gradient_accumulation_steps']}"
         )
+        if model_load_path is not None:
+            print(f"Loading pretrained weights from: {model_load_path}")
         if runtime_cfg["backend"] == "deepspeed":
             print(
                 "DeepSpeed settings: "

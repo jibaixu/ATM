@@ -91,6 +91,8 @@ train_dataset_dir: ???
 val_dataset_dir: ???
 stat_path: ???
 
+model_load_path: ???
+
 optimizer_cfg:
   type: optim.Adam
   params:
@@ -105,6 +107,7 @@ scheduler_cfg:
     T_max: ${epochs}
 
 model_cfg:
+  load_path: ${model_load_path}
   transformer_cfg:
     dim: ${dim}
     dim_head: ${dim_head}

@@ -2,13 +2,28 @@ import json
 import os
 # import sys
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import decord
+except ImportError:
+    decord = None
+
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torchvision import transforms
-import decord
+try:
+    import imageio
+except ImportError:
+    imageio = None
+
 from einops import rearrange
 from tqdm import tqdm
 
@@ -16,6 +31,22 @@ from atm.dataloader.utils import ImgTrackColorJitter, ImgViewDiffTranslationAug
 from atm.utils.flow_utils import sample_tracks_visible_first, sample_tracks_nearest_to_grids
 
 class RoboCoinATMActionDataset(Dataset):
+    @staticmethod
+    def _normalize_img_size(img_size):
+        if isinstance(img_size, int):
+            return (img_size, img_size)
+
+        try:
+            img_size = tuple(int(v) for v in img_size)
+        except TypeError as exc:
+            raise TypeError(
+                f"img_size must be an int or a length-2 iterable of ints, got {type(img_size)!r}"
+            ) from exc
+
+        if len(img_size) != 2:
+            raise ValueError(f"img_size must contain exactly 2 elements, got {img_size}")
+        return img_size
+
     def __init__(self,
                  jsonl_path,
                  dataset_dir,
@@ -40,9 +71,8 @@ class RoboCoinATMActionDataset(Dataset):
         super().__init__()
         self.dataset_dir = dataset_dir
         self.jsonl_path = jsonl_path
-        
-        if isinstance(img_size, int):
-            img_size = (img_size, img_size)
+
+        img_size = self._normalize_img_size(img_size)
         self.img_size = img_size
         self.num_track_ts = num_track_ts
         self.num_track_ids = num_track_ids
@@ -208,11 +238,92 @@ class RoboCoinATMActionDataset(Dataset):
             # 按需缓存 Image
             if self.cache_image:
                 video_path = os.path.join(self.dataset_dir, entry["video"])
-                vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-                frames = vr.get_batch(range(len(vr))).asnumpy()
-                cache_dict['frames'] = frames
+                cache_dict['frames'] = self._load_video_frames(video_path)
 
             self._cache[i] = cache_dict
+
+    @staticmethod
+    def _load_video_frames_decord(video_path, frame_indices=None):
+        if decord is None:
+            raise RuntimeError("decord is not available")
+
+        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+        if frame_indices is None:
+            frame_indices = range(len(vr))
+        return vr.get_batch(frame_indices).asnumpy()
+
+    @staticmethod
+    def _load_video_frames_imageio(video_path, frame_indices=None):
+        if imageio is None:
+            raise RuntimeError("imageio is not available")
+
+        reader = imageio.get_reader(video_path)
+        frames = []
+        try:
+            if frame_indices is None:
+                for frame in reader:
+                    frames.append(frame)
+            else:
+                for idx in frame_indices:
+                    frames.append(reader.get_data(int(idx)))
+        finally:
+            reader.close()
+
+        if not frames:
+            raise RuntimeError("imageio decoded 0 frames")
+        return np.stack(frames, axis=0)
+
+    @staticmethod
+    def _load_video_frames_cv2(video_path, frame_indices=None):
+        if cv2 is None:
+            raise RuntimeError("opencv-python is not available")
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError("cv2.VideoCapture failed to open video")
+
+        frames = []
+        try:
+            if frame_indices is None:
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                for idx in frame_indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+                    ret, frame = cap.read()
+                    if not ret:
+                        raise RuntimeError(f"cv2 failed to read frame {idx}")
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        finally:
+            cap.release()
+
+        if not frames:
+            raise RuntimeError("cv2 decoded 0 frames")
+        return np.stack(frames, axis=0)
+
+    @classmethod
+    def _load_video_frames(cls, video_path, frame_indices=None):
+        errors = []
+        loaders = [
+            ("decord", cls._load_video_frames_decord),
+            ("imageio", cls._load_video_frames_imageio),
+            ("cv2", cls._load_video_frames_cv2),
+        ]
+
+        for backend_name, loader in loaders:
+            try:
+                return loader(video_path, frame_indices=frame_indices)
+            except Exception as exc:
+                errors.append(f"{backend_name}: {exc}")
+
+        raise RuntimeError(
+            f"Failed to decode video {video_path}. "
+            f"Backends tried: {'; '.join(errors)}"
+        )
 
     def __len__(self):
         return len(self.data_entries)
@@ -222,25 +333,23 @@ class RoboCoinATMActionDataset(Dataset):
         start_frame = entry["start_frame"]
         
         # --- 1. 读取 Frame Stack 图像 ---
-        if self.cache_all and self.cache_image:
-            all_frames = self._cache[index]['frames']
-        else:
-            video_path = os.path.join(self.dataset_dir, entry["video"])
-            vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-            all_frames = vr
-
         #! frame_stack 表示取从当前帧 start_frame 开始到之前的连续帧数，但track永远都只选取 start_frame 处的查询点处开始的轨迹
         img_start_idx = max(start_frame + 1 - self.frame_stack, 0)
         img_end_idx = start_frame + 1
         
-        video_len = len(all_frames)
+        video_len = len(self._cache[index]['frames']) if (self.cache_all and self.cache_image) else int(
+            entry.get("raw_length", img_end_idx)
+        )
         img_indices = np.arange(img_start_idx, img_end_idx)
         img_indices = np.clip(img_indices, a_min=None, a_max=video_len - 1)
 
-        if isinstance(all_frames, np.ndarray):
+        if self.cache_all and self.cache_image:
+            all_frames = self._cache[index]['frames']
             frames = torch.from_numpy(all_frames[img_indices]).float()
         else:
-            frames = torch.from_numpy(all_frames.get_batch(img_indices).asnumpy()).float()
+            video_path = os.path.join(self.dataset_dir, entry["video"])
+            frame_array = self._load_video_frames(video_path, frame_indices=img_indices)
+            frames = torch.from_numpy(frame_array).float()
 
         frames = rearrange(frames, "t h w c -> t c h w")
 

@@ -1,0 +1,23 @@
+defaults:
+  - robocoin_track_transformer_action
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+experiment: eval_track_transformer_action
+batch_size: 1
+num_track_ids: 256
+train_jsonl: ""
+val_jsonl: ""
+train_dataset_dir: ""
+val_dataset_dir: ""
+stat_path: ""
+model_load_path: null
+
+ckpt_path: ???
+output_dir: null
+vis_every_n_batches: 10
+eval_batch_size: 1

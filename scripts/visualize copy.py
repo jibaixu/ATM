@@ -26,10 +26,10 @@ from atm.utils.cotracker_utils import Visualizer
 
 # --- 基础配置 ---
 # 根据 preprocess_robocoin_2.py 中的设置 
-BASE_DIR = Path("/data_jbx/Datasets/Realbot/4_4_four_tasks_wan")
-VAL_JSONL = BASE_DIR / "meta" / "episodes.jsonl"
+BASE_DIR = Path("/data_jbx/Datasets/Realbot")
+VAL_JSONL = BASE_DIR / "episodes_train_realbot.jsonl"
 SAVE_DIR = "results/vis_dataset/realbot"
-INDEX = 80
+INDEX = 4
 
 def _load_video_frames_decord(video_path, frame_indices=None):
     vr = decord.VideoReader(str(video_path), ctx=decord.cpu(0))
@@ -125,22 +125,16 @@ def main():
         lines = f.readlines()
         item = json.loads(lines[INDEX]) # 随机选一行 
 
-    print(f"Visualizing episode: {item['episode_index']}")
+    print(f"Visualizing episode: {item['episode_index']} from {item['dataset_name']}")
 
     start_frame, end_frame = item['start_frame'], item['end_frame']
 
     # 2. 加载视频和轨迹
-    video_path = BASE_DIR / item['video'][0]
-    episode_name = Path(item['video'][0]).stem
-    track_path = BASE_DIR / "tracks" / "chunk-000" / "observation.tracks.image" / f"{episode_name}.npz"
+    video_path = BASE_DIR / item['video']
+    track_path = BASE_DIR / item['track']
     
     video_tensor = load_video_to_tensor(video_path) # (B, T, C, H, W)
     video_tensor = video_tensor[:, start_frame:end_frame+1, :, :, :] # 裁剪到指定帧范围
-    # 双线性插值调整到 240*320 分辨率
-    B, T, C, H, W = video_tensor.shape
-    video_reshaped = video_tensor.view(B * T, C, H, W)
-    video_tensor = F.interpolate(video_reshaped, size=(240, 320), mode='bilinear', align_corners=False)
-    video_tensor = video_tensor.view(B, T, C, 240, 320)
     _, T, _, H, W = video_tensor.shape
 
     # 加载轨迹并还原归一化坐标 
@@ -161,7 +155,7 @@ def main():
         video=video_tensor,
         tracks=tracks_tensor,
         visibility=visibility_tensor,
-        filename=f"ep_{item['episode_index']}_index{INDEX}_{Path(item['video'][0]).stem}_1000"
+        filename=f"ep_{item['episode_index']}_index{INDEX}_{Path(item['video']).stem}"
     )
 
 if __name__ == "__main__":

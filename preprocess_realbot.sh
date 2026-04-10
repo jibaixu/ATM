@@ -8,12 +8,14 @@ mkdir -p log
 # 格式: "显卡编号:数据集编号:view:episode_min"
 # ==========================================
 TASKS=(
-    "0:0:image:50"
-    "0:0:wrist_image:50"
-    "1:1:image:50"
-    "1:1:wrist_image:50"
-    "2:2:image:50"
-    "2:2:wrist_image:50"
+    # "0:0:image:0:-1"
+    # "0:0:wrist_image:0:-1"
+    "0:0:image:120:159"
+    "1:0:wrist_image:120:159"
+    # "0:0:image:160:239"
+    # "0:0:wrist_image:160:239"
+    # "1:0:image:240:-1"
+    # "1:0:wrist_image:240:-1"
 )
 
 echo "🚀 开始批量提交预处理任务..."
@@ -22,18 +24,19 @@ echo "------------------------------------------"
 # 遍历数组中的每一个任务
 for TASK in "${TASKS[@]}"; do
     # 使用 ':' 作为分隔符，将字符串拆分并赋值给对应的变量
-    IFS=':' read -r GPU DATASET VIEW MIN_EP <<< "$TASK"
+    IFS=':' read -r GPU DATASET VIEW MIN_EP MAX_EP <<< "$TASK"
     
     # 动态生成日志文件名
-    LOG_FILE="log/${DATASET}_${VIEW}_${MIN_EP}.log"
+    LOG_FILE="log/${DATASET}_${VIEW}_${MIN_EP}_${MAX_EP}.log"
     
-    echo "➡️ 启动任务: [显卡 $GPU] 数据集=$DATASET | View=$VIEW | Min_Ep=$MIN_EP"
+    echo "➡️ 启动任务: [显卡 $GPU] 数据集=$DATASET | View=$VIEW | Min_Ep=$MIN_EP | Max_Ep=$MAX_EP"
     
     # 执行 Python 脚本并放入后台
     CUDA_VISIBLE_DEVICES=$GPU python scripts/preprocess_realbot.py \
         --dataset_idx $DATASET \
         --view $VIEW \
-        --min_episode $MIN_EP > "$LOG_FILE" 2>&1 &
+        --min_episode $MIN_EP \
+        --max_episode $MAX_EP > "$LOG_FILE" 2>&1 &
 done
 
 echo "------------------------------------------"

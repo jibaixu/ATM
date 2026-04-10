@@ -7,10 +7,10 @@ api.login('ms-ae02ff7d-db79-48c3-b0b4-36967e8cdbdf')
 from modelscope.hub.snapshot_download import snapshot_download
 
 # 在这里指定你想要的路径
-your_local_path = '/data_jbx/Datasets/Realbot'
+your_local_path = '/data_jbx/Datasets/Realbot/4_4_four_tasks_wan'
 
 snapshot_download(
-    'jibaixu/Realbot0407', 
+    'jibaixu/4_4_four_tasks_wan', 
     repo_type='dataset', 
     local_dir=your_local_path
 )
