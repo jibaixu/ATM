@@ -3,58 +3,75 @@ import sys
 from contextlib import nullcontext
 
 import cv2
+import imageio.v2 as imageio
 import numpy as np
 import torch
 from einops import repeat
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-from atm.model.track_transformer_action import TrackTransformerAction
+import atm.model as model_zoo
+from atm.dataloader import RoboCoinATMActionDataset
 from atm.utils.flow_utils import draw_tracks_on_single_image
 
 
-def _build_default_cfg():
-    return OmegaConf.create(
-        {
-            "mix_precision": True,
-            "model_cfg": {
-                "transformer_cfg": {
-                    "dim": 384,
-                    "dim_head": None,
-                    "heads": 8,
-                    "depth": 8,
-                    "attn_dropout": 0.2,
-                    "ff_dropout": 0.2,
-                },
-                "track_cfg": {
-                    "num_track_ts": 81,
-                    "num_track_ids": 256,
-                    "patch_size": 9,
-                },
-                "vid_cfg": {
-                    "img_size": [240, 320],
-                    "frame_stack": 1,
-                    "patch_size": 16,
-                },
-                "language_encoder_cfg": {
-                    "network_name": "MLPEncoder",
-                    "input_size": 768,
-                    "hidden_size": 128,
-                    "num_layers": 1,
-                },
-            },
-        }
-    )
+def _checkpoint_config_path(checkpoint_path):
+    return os.path.join(os.path.dirname(checkpoint_path), "config.yaml")
 
 
-def _load_runtime_cfg(default_cfg, ckpt_path):
-    saved_cfg_path = os.path.join(os.path.dirname(ckpt_path), "config.yaml")
-    if os.path.exists(saved_cfg_path):
-        return OmegaConf.load(saved_cfg_path)
-    return default_cfg
+def _load_runtime_cfg(checkpoint_path):
+    saved_cfg_path = _checkpoint_config_path(checkpoint_path)
+    if not os.path.isfile(saved_cfg_path):
+        raise FileNotFoundError(
+            f"Training config not found next to checkpoint: {saved_cfg_path}"
+        )
+    return OmegaConf.load(saved_cfg_path)
+
+
+def _resolve_cfg_node(cfg, key):
+    if key not in cfg:
+        raise KeyError(f"Missing '{key}' in saved config.")
+    return OmegaConf.to_container(cfg[key], resolve=True)
+
+
+def _get_model_cfg(cfg):
+    model_cfg = dict(_resolve_cfg_node(cfg, "model_cfg"))
+    model_cfg.pop("load_path", None)
+    if "action_dim" not in model_cfg:
+        model_cfg["action_dim"] = 14
+    return OmegaConf.create(model_cfg)
+
+
+def _get_dataset_cfg(cfg):
+    return dict(_resolve_cfg_node(cfg, "dataset_cfg"))
+
+
+def _extract_state_dict(checkpoint):
+    if isinstance(checkpoint, dict):
+        for key in ("state_dict", "model_state_dict", "model"):
+            value = checkpoint.get(key)
+            if isinstance(value, dict):
+                checkpoint = value
+                break
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Unsupported checkpoint format: {type(checkpoint)!r}")
+
+    if any(key.startswith(("module.", "model.")) for key in checkpoint.keys()):
+        normalized = {}
+        for key, value in checkpoint.items():
+            new_key = key
+            if new_key.startswith("module."):
+                new_key = new_key[len("module.") :]
+            if new_key.startswith("model."):
+                new_key = new_key[len("model.") :]
+            normalized[new_key] = value
+        return normalized
+
+    return checkpoint
 
 
 def _get_model_input_dtype(model):
@@ -107,6 +124,123 @@ def _build_query_points(num_track_ids, device, dtype, margin=0.02):
     return torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
 
 
+def _prepare_rgb_image(image):
+    if isinstance(image, torch.Tensor):
+        image = image.detach().cpu().numpy()
+
+    image = np.asarray(image)
+    if image.ndim != 3:
+        raise ValueError(f"image must have shape (H, W, C) or (C, H, W), got {image.shape}.")
+
+    if image.shape[0] in (1, 3) and image.shape[-1] not in (1, 3):
+        image = np.transpose(image, (1, 2, 0))
+
+    if image.shape[-1] == 1:
+        image = np.repeat(image, 3, axis=-1)
+    if image.shape[-1] != 3:
+        raise ValueError(f"image must have 3 channels after conversion, got {image.shape}.")
+
+    image = np.clip(image, 0, 255)
+    return image.astype(np.uint8)
+
+
+def _resolve_data_path(dataset_dir, path):
+    resolved_path = os.path.expanduser(str(path))
+    if os.path.isabs(resolved_path):
+        return resolved_path
+    return os.path.join(dataset_dir, resolved_path)
+
+
+def _prepare_video_frames(video_frames, img_size, expected_steps=None):
+    if isinstance(video_frames, torch.Tensor):
+        video_np = video_frames.detach().cpu().numpy()
+    else:
+        video_np = np.asarray(video_frames)
+
+    if video_np.ndim == 5:
+        if video_np.shape[0] != 1:
+            raise ValueError("video_frames only supports batch size 1 when passing 5D input.")
+        video_np = video_np[0]
+
+    if video_np.ndim != 4:
+        raise ValueError(
+            f"video_frames must have shape (T, H, W, C) or (T, C, H, W), got {video_np.shape}."
+        )
+
+    if video_np.shape[-1] != 3:
+        if video_np.shape[1] in (1, 3):
+            video_np = np.transpose(video_np, (0, 2, 3, 1))
+        else:
+            raise ValueError(
+                f"video_frames must have 3 channels, got {video_np.shape}."
+            )
+
+    height, width = img_size
+    prepared_frames = []
+    for frame in video_np:
+        frame = _prepare_rgb_image(frame)
+        if frame.shape[:2] != (height, width):
+            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+        prepared_frames.append(frame)
+
+    if not prepared_frames:
+        raise ValueError("video_frames is empty.")
+
+    prepared_frames = np.stack(prepared_frames, axis=0)
+
+    if expected_steps is not None:
+        if prepared_frames.shape[0] < expected_steps:
+            pad = np.repeat(prepared_frames[-1:], expected_steps - prepared_frames.shape[0], axis=0)
+            prepared_frames = np.concatenate([prepared_frames, pad], axis=0)
+        elif prepared_frames.shape[0] > expected_steps:
+            prepared_frames = prepared_frames[:expected_steps]
+
+    return prepared_frames
+
+
+def _prepare_track_tensor(tracks, name):
+    if isinstance(tracks, torch.Tensor):
+        track_tensor = tracks.detach().cpu()
+    else:
+        track_tensor = torch.as_tensor(tracks)
+
+    if track_tensor.ndim == 3:
+        track_tensor = track_tensor.unsqueeze(0)
+
+    if track_tensor.ndim != 4 or track_tensor.shape[0] != 1 or track_tensor.shape[-1] != 2:
+        raise ValueError(
+            f"{name} must have shape (T, N, 2) or (1, T, N, 2), got {tuple(track_tensor.shape)}."
+        )
+
+    return track_tensor.float()
+
+
+def _annotate_panel(frame, label):
+    annotated = frame.copy()
+    origin = (12, 30)
+    cv2.putText(
+        annotated,
+        label,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.85,
+        (20, 20, 20),
+        4,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        annotated,
+        label,
+        origin,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.85,
+        (245, 245, 245),
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
+
+
 class ATMInference:
     def __init__(self, checkpoint_path, device="cuda"):
         checkpoint_path = os.path.abspath(checkpoint_path)
@@ -118,25 +252,99 @@ class ATMInference:
             raise RuntimeError("CUDA device requested but CUDA is not available.")
 
         self.checkpoint_path = checkpoint_path
-        self.cfg = _load_runtime_cfg(_build_default_cfg(), checkpoint_path)
-        with open_dict(self.cfg.model_cfg):
-            self.cfg.model_cfg.action_dim = 14
+        self.cfg = _load_runtime_cfg(checkpoint_path)
+        self.model_name = str(self.cfg.model_name)
+        self.model_cfg = _get_model_cfg(self.cfg)
+        self.dataset_cfg = _get_dataset_cfg(self.cfg)
 
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-        self.model = TrackTransformerAction(**self.cfg.model_cfg).to(device=self.device)
+        model_cls = getattr(model_zoo, self.model_name)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = _extract_state_dict(checkpoint)
+
+        self.model = model_cls(**self.model_cfg).to(device=self.device)
         self.model.load_state_dict(state_dict, strict=True)
         self.model.eval()
 
         self.mix_precision = bool(self.cfg.get("mix_precision", False))
-        self.num_track_ids = int(self.cfg.model_cfg.track_cfg.num_track_ids)
-        self.num_track_ts = int(self.cfg.model_cfg.track_cfg.num_track_ts)
-        self.frame_stack = int(self.cfg.model_cfg.vid_cfg.frame_stack)
-        self.action_dim = int(self.cfg.model_cfg.action_dim)
-        self.task_emb_dim = int(self.cfg.model_cfg.language_encoder_cfg.input_size)
-        img_size_cfg = self.cfg.model_cfg.vid_cfg.img_size
+        self.num_track_ids = int(self.model_cfg["track_cfg"]["num_track_ids"])
+        self.num_track_ts = int(self.model_cfg["track_cfg"]["num_track_ts"])
+        self.frame_stack = int(self.model_cfg["vid_cfg"]["frame_stack"])
+        self.action_dim = int(self.model_cfg["action_dim"])
+        self.task_emb_dim = int(self.model_cfg["language_encoder_cfg"]["input_size"])
+        img_size_cfg = self.model_cfg["vid_cfg"]["img_size"]
         self.img_size = (int(img_size_cfg[0]), int(img_size_cfg[1]))
 
-    def _validate_inputs(self, video, task_emb, action):
+    def build_demo_dataset(
+        self,
+        jsonl_path=None,
+        dataset_dir=None,
+        stat_path=None,
+        aug_prob=0.0,
+        cache_all=None,
+    ):
+        dataset_cfg = dict(self.dataset_cfg)
+        dataset_cfg["aug_prob"] = aug_prob
+        if stat_path is not None:
+            dataset_cfg["stat_path"] = stat_path
+        if cache_all is not None:
+            dataset_cfg["cache_all"] = cache_all
+
+        resolved_jsonl = jsonl_path or self.cfg.get("val_jsonl") or self.cfg.get("train_jsonl")
+        resolved_dataset_dir = dataset_dir or self.cfg.get("val_dataset_dir") or self.cfg.get("train_dataset_dir")
+        if resolved_jsonl is None or resolved_dataset_dir is None:
+            raise ValueError(
+                "Dataset paths are missing. Provide jsonl_path/dataset_dir or ensure they exist in config.yaml."
+            )
+
+        return RoboCoinATMActionDataset(
+            jsonl_path=resolved_jsonl,
+            dataset_dir=resolved_dataset_dir,
+            **dataset_cfg,
+        )
+
+    def load_entry_video_frames(self, entry, dataset_dir, expected_steps=None):
+        required_keys = ("video", "track", "start_frame", "end_frame")
+        missing_keys = [key for key in required_keys if key not in entry]
+        if missing_keys:
+            raise KeyError(f"Missing required entry fields for visualization: {missing_keys}")
+
+        video_path = _resolve_data_path(dataset_dir, entry["video"])
+        track_path = _resolve_data_path(dataset_dir, entry["track"])
+        if not os.path.isfile(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        if not os.path.isfile(track_path):
+            raise FileNotFoundError(f"Track file not found: {track_path}")
+
+        start_frame = int(entry["start_frame"])
+        end_frame = int(entry["end_frame"])
+        if end_frame < start_frame:
+            raise ValueError(
+                f"Invalid frame range in entry: start_frame={start_frame}, end_frame={end_frame}."
+            )
+
+        frame_indices = np.arange(start_frame, end_frame + 1, dtype=np.int64)
+        raw_length = entry.get("raw_length")
+
+        if raw_length is not None:
+            raw_length = int(raw_length)
+            if raw_length <= 0:
+                raise ValueError(f"raw_length must be positive, got {raw_length}.")
+            frame_indices = np.clip(frame_indices, 0, raw_length - 1)
+            frames = RoboCoinATMActionDataset._load_video_frames(video_path, frame_indices=frame_indices)
+        else:
+            all_frames = RoboCoinATMActionDataset._load_video_frames(video_path)
+            if all_frames.shape[0] == 0:
+                raise RuntimeError(f"Decoded 0 frames from video: {video_path}")
+            frame_indices = np.clip(frame_indices, 0, all_frames.shape[0] - 1)
+            frames = all_frames[frame_indices]
+
+        return _prepare_video_frames(
+            frames,
+            img_size=self.img_size,
+            expected_steps=expected_steps,
+        )
+
+    def _validate_inputs(self, video, task_emb, action, track):
         if not all(isinstance(tensor, torch.Tensor) for tensor in (video, task_emb, action)):
             raise TypeError("video, task_emb, and action must all be torch.Tensor instances.")
         if video.ndim != 5:
@@ -174,32 +382,51 @@ class ATMInference:
         if not action.is_floating_point():
             raise TypeError("action must be a floating-point tensor.")
 
+        if track is not None:
+            if not isinstance(track, torch.Tensor):
+                raise TypeError("track must be a torch.Tensor when provided.")
+            if track.ndim != 4:
+                raise ValueError(
+                    f"track must have shape (B, {self.num_track_ts}, {self.num_track_ids}, 2), "
+                    f"got {tuple(track.shape)}."
+                )
+            expected_shape = (video.shape[0], self.num_track_ts, self.num_track_ids, 2)
+            if tuple(track.shape) != expected_shape:
+                raise ValueError(
+                    f"track must have shape {expected_shape}, got {tuple(track.shape)}."
+                )
+            if not track.is_floating_point():
+                raise TypeError("track must be a floating-point tensor.")
+
     def _generate_query_tracks(self, batch_size):
         dtype = _get_model_input_dtype(self.model)
         points = _build_query_points(self.num_track_ids, self.device, dtype)
         return repeat(points, "n c -> b t n c", b=batch_size, t=self.num_track_ts)
 
     @torch.no_grad()
-    def infer(self, video, task_emb, action):
+    def infer(self, video, task_emb, action, track=None):
         """
         Args:
-            video: (B, T, C, H, W), raw image values in the same format used by eval.
-            task_emb: (B, E), already prepared language embedding tensor.
-            action: (B, num_track_ts, action_dim), already reordered and normalized.
+            video: (B, T, C, H, W), raw uint8-like image values in [0, 255].
+            task_emb: (B, E), language embedding tensor.
+            action: (B, num_track_ts, action_dim), reordered and normalized actions.
+            track: optional (B, num_track_ts, num_track_ids, 2), sampled query tracks.
         Returns:
             rec_track: (B, num_track_ts, num_track_ids, 2), normalized coordinates in [0, 1].
         """
-        self._validate_inputs(video, task_emb, action)
+        self._validate_inputs(video, task_emb, action, track)
 
         if not video.is_floating_point():
             video = video.float()
 
-        track_grid = self._generate_query_tracks(video.shape[0])
-        video, track_grid, _, task_emb, action = _cast_batch_for_model(
+        if track is None:
+            track = self._generate_query_tracks(video.shape[0])
+
+        video, track, _, task_emb, action = _cast_batch_for_model(
             self.model,
             self.device,
             video,
-            track_grid,
+            track,
             None,
             task_emb,
             action,
@@ -209,145 +436,160 @@ class ATMInference:
             with _get_autocast_context(self.cfg, self.device):
                 rec_track, _ = self.model.reconstruct(
                     vid=video,
-                    track=track_grid,
+                    track=track,
                     task_emb=task_emb,
                     p_img=0.0,
                     action=action,
                 )
         return rec_track
 
-    def draw_tracks_on_image(self, image, predictions):
+    def save_predictions_video(
+        self,
+        video_frames,
+        dataset_tracks,
+        predictions,
+        output_path="output_tracks.mp4",
+        track_idx_to_show=None,
+        fps=10,
+    ):
         """
-        Draw a subset of predicted trajectories on a single RGB image.
+        Save a side-by-side comparison video for qualitative inspection.
 
         Args:
-            image: RGB image in HWC or CHW format.
-            predictions: (T, N, 2) or (1, T, N, 2), normalized coordinates.
-            track_idx_to_show: optional indices of tracks to render.
+            video_frames: (T, H, W, C) or (T, C, H, W), RGB frames for playback.
+            dataset_tracks: (T, N, 2) or (1, T, N, 2), GT tracks from dataset sampling.
+            predictions: (T, N, 2) or (1, T, N, 2), predicted normalized coordinates.
         """
-        if isinstance(predictions, torch.Tensor):
-            pred_tensor = predictions.detach().cpu()
-        else:
-            pred_tensor = torch.as_tensor(predictions)
-
-        if pred_tensor.ndim == 3:
-            pred_tensor = pred_tensor.unsqueeze(0)
-        if pred_tensor.ndim != 4 or pred_tensor.shape[0] != 1:
+        gt_tensor = _prepare_track_tensor(dataset_tracks, "dataset_tracks")
+        pred_tensor = _prepare_track_tensor(predictions, "predictions")
+        if gt_tensor.shape[1] != pred_tensor.shape[1]:
             raise ValueError(
-                "predictions must have shape (T, N, 2) or (1, T, N, 2)."
+                f"dataset_tracks and predictions must have the same time length, got "
+                f"{gt_tensor.shape[1]} and {pred_tensor.shape[1]}."
+            )
+        if gt_tensor.shape[2] != pred_tensor.shape[2]:
+            raise ValueError(
+                f"dataset_tracks and predictions must have the same number of tracks, got "
+                f"{gt_tensor.shape[2]} and {pred_tensor.shape[2]}."
             )
 
-        return draw_tracks_on_single_image(
-            pred_tensor,
-            image,
+        video_frames = _prepare_video_frames(
+            video_frames,
             img_size=self.img_size,
-            tracks_leave_trace=min(15, pred_tensor.shape[1] - 1),
+            expected_steps=gt_tensor.shape[1],
         )
-
-    def save_predictions_video(self, background_img, predictions, output_path="output_tracks.mp4", track_idx_to_show=None):
-        """
-        Save a simple trajectory video for qualitative inspection.
-
-        Args:
-            background_img: RGB image in HWC format.
-            predictions: (T, N, 2) or (1, T, N, 2), normalized coordinates.
-        """
-        if isinstance(predictions, torch.Tensor):
-            pred_tensor = predictions.detach().cpu()
-        else:
-            pred_tensor = torch.as_tensor(predictions)
-
-        if pred_tensor.ndim == 3:
-            pred_tensor = pred_tensor.unsqueeze(0)
-        if pred_tensor.ndim != 4 or pred_tensor.shape[0] != 1:
-            raise ValueError(
-                "predictions must have shape (T, N, 2) or (1, T, N, 2)."
-            )
 
         num_tracks = pred_tensor.shape[2]
         if track_idx_to_show is None:
-            num_show = min(32, num_tracks)
+            num_show = num_tracks
             track_idx_to_show = np.linspace(0, num_tracks - 1, num_show, dtype=int)
+        else:
+            track_idx_to_show = np.asarray(track_idx_to_show, dtype=int)
 
+        gt_tensor = gt_tensor[:, :, track_idx_to_show]
         pred_tensor = pred_tensor[:, :, track_idx_to_show]
-        height, width = self.img_size
-        video_writer = cv2.VideoWriter(
-            output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            10,
-            (width, height),
-        )
 
-        for t in range(pred_tensor.shape[1]):
-            frame = draw_tracks_on_single_image(
-                pred_tensor[:, : t + 1],
-                background_img,
-                img_size=self.img_size,
-                tracks_leave_trace=min(15, t),
+        output_root, _ = os.path.splitext(os.path.abspath(output_path))
+        output_path = output_root + ".mp4"
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        try:
+            writer = imageio.get_writer(
+                output_path,
+                format="FFMPEG",
+                fps=fps,
+                codec="libx264",
+                ffmpeg_log_level="error",
+                ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             )
-            video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize ffmpeg-backed MP4 writer via imageio. "
+                "Install imageio-ffmpeg and ensure ffmpeg is available."
+            ) from exc
 
-        video_writer.release()
+        try:
+            for t in range(pred_tensor.shape[1]):
+                frame = video_frames[t]
+                gt_frame = draw_tracks_on_single_image(
+                    gt_tensor[:, : t + 1],
+                    frame,
+                    img_size=self.img_size,
+                    tracks_leave_trace=min(15, t),
+                )
+                pred_frame = draw_tracks_on_single_image(
+                    pred_tensor[:, : t + 1],
+                    frame,
+                    img_size=self.img_size,
+                    tracks_leave_trace=min(15, t),
+                )
+                combined_frame = np.concatenate(
+                    [
+                        _annotate_panel(gt_frame, "Dataset Track"),
+                        _annotate_panel(pred_frame, "Pred Track"),
+                    ],
+                    axis=1,
+                )
+                writer.append_data(_prepare_rgb_image(combined_frame))
+        finally:
+            writer.close()
+
         print(f"Video saved to {output_path}")
 
 
 if __name__ == "__main__":
-    # 1. 路径配置（参考 eval_track_transformer_action.py 中的设置）
-    #
-    checkpoint_path = "/home/jibaixu/Codes/ATM/results/track_transformer/0326_robocoin_track_transformer_001B_action_bs_8_grad_acc_4_numtrack_256_robocoin-object_ep1001_2109/model_best.ckpt"
+    checkpoint_path = "/data_jbx/Codes/ATM/results/track_transformer/0409_realbot_track_transformer_001B_action_bs_16_grad_acc_4_numtrack_256_ep1001_0047/model_best.ckpt"
 
-    dataset_root = "/home/jibaixu/Datasets/Cobot_Magic_all_extracted/resize_240_320"
-    jsonl_path = os.path.join(dataset_root, "episodes_clipped_train_test.jsonl")
-    stat_path = os.path.join(dataset_root, "stat.json")
+    jsonl_path = "/data_jbx/Datasets/Realbot/episodes_train_realbot.jsonl"
+    dataset_root = "/data_jbx/Datasets/Realbot"
+    stat_path = "/data_jbx/Datasets/Realbot/4_4_four_tasks_wan/meta/stat.json"
+    sample_idxs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
-    # 2. 初始化推理引擎
-    #
+    output_dir = "results/inference_track"
+    os.mkdir(output_dir, exist_ok=True)
+
     infer_engine = ATMInference(checkpoint_path)
-
-    # 3. 初始化真实数据集
-    # 按照 eval 脚本逻辑，关闭数据增强 (aug_prob=0) 并使用对应的统计文件
-    from atm.dataloader.robocoin_action_dataloader import RoboCoinATMActionDataset
-    
-    dataset = RoboCoinATMActionDataset(
+    dataset = infer_engine.build_demo_dataset(
         jsonl_path=jsonl_path,
         dataset_dir=dataset_root,
-        img_size=infer_engine.img_size,
-        num_track_ts=infer_engine.num_track_ts,
-        num_track_ids=infer_engine.num_track_ids,
-        frame_stack=infer_engine.frame_stack,
         stat_path=stat_path,
-        aug_prob=0.0,  # 推理时不需要增强
-        cache_all=False
+        aug_prob=0.0,
+        cache_all=False,
     )
 
-    # 4. 取出一个真实数据样本
-    # dataset[i] 返回: frames(T,C,H,W), tracks(T,N,2), vis(T,N), task_emb(E), actions(T,A)
-    sample_idx = 0
-    real_video, real_tracks, _, real_task_emb, real_action = dataset[sample_idx]
+    for sample_idx in sample_idxs:
+        entry = dataset.data_entries[sample_idx]
+        video_frames = infer_engine.load_entry_video_frames(
+            entry,
+            dataset_dir=dataset.dataset_dir,
+            expected_steps=infer_engine.num_track_ts,
+        )
 
-    # 5. 增加 Batch 维度 (B=1) 以适配推理接口
-    #
-    input_vid = real_video.unsqueeze(0)        # (1, T, C, H, W)
-    input_task_emb = real_task_emb.unsqueeze(0) # (1, E)
-    input_action = real_action.unsqueeze(0)    # (1, T_track, A)
+        real_video, real_tracks, _, real_task_emb, real_action = dataset[sample_idx]
 
-    print(f"正在处理样本 {sample_idx}，任务维度: {input_task_emb.shape}")
+        input_vid = real_video.unsqueeze(0)
+        input_track = real_tracks.unsqueeze(0)
+        input_task_emb = real_task_emb.unsqueeze(0)
+        input_action = real_action.unsqueeze(0)
 
-    # 6. 执行推理
-    #
-    preds = infer_engine.infer(input_vid, input_task_emb, input_action)
+        print(
+            f"Processing sample {sample_idx}, "
+            f"input_video={tuple(input_vid.shape)}, vis_video={tuple(video_frames.shape)}, "
+            f"track={tuple(input_track.shape)}, task_emb={tuple(input_task_emb.shape)}, "
+            f"action={tuple(input_action.shape)}, start_frame={entry['start_frame']}, "
+            f"end_frame={entry['end_frame']}"
+        )
 
-    # 7. 保存可视化结果
-    # 取最后一帧作为背景图
-    img_np = real_video[-1].permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-    
-    # 保存静态轨迹图
-    static_vis = infer_engine.draw_tracks_on_image(img_np, preds[0])
-    cv2.imwrite("real_sample_tracks.jpg", cv2.cvtColor(static_vis, cv2.COLOR_RGB2BGR))
+        preds = infer_engine.infer(
+            input_vid,
+            input_task_emb,
+            input_action,
+            track=input_track,
+        )
 
-    # 保存轨迹动画视频
-    infer_engine.save_predictions_video(
-        img_np, 
-        preds[0], 
-        output_path="real_sample_inference.mp4"
-    )
+        infer_engine.save_predictions_video(
+            video_frames,
+            input_track,
+            preds,
+            output_path=f"{output_dir}/real_sample_inference_{sample_idx}.mp4",
+        )
