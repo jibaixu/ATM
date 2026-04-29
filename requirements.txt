@@ -59,6 +59,7 @@ llvmlite
 Markdown
 MarkupSafe
 matplotlib
+modelscope
 mink
 moviepy==1.0.3
 mpmath

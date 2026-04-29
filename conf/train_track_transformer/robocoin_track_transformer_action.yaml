@@ -28,8 +28,8 @@ batch_size: ???
 gradient_accumulation_steps: 4
 mix_precision: true
 num_workers: 8
-val_freq: 5
-save_freq: 10
+val_freq: 1
+save_freq: 1
 clip_grad: 2.
 epochs: 1001
 seed: 42
@@ -78,10 +78,10 @@ depth: 8
 
 img_size: [240, 320]
 frame_stack: 1
-num_track_ts: 81
+num_track_ts: 20
 num_track_ids: ???
 patch_size: 16
-track_patch_size: 9
+track_patch_size: 4
 
 aug_prob: 0.9
 
@@ -91,7 +91,7 @@ train_dataset_dir: ???
 val_dataset_dir: ???
 stat_path: ???
 
-model_load_path: ???
+model_load_path: null
 
 optimizer_cfg:
   type: optim.Adam
@@ -134,7 +134,7 @@ dataset_cfg:
   frame_stack: ${frame_stack}
   num_track_ts: ${num_track_ts}
   num_track_ids: ${num_track_ids}
-  cache_all: true
+  cache_all: false
   cache_image: false
   cache_track: false
   stat_path: ${stat_path}

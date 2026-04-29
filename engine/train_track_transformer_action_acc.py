@@ -16,23 +16,40 @@ def debug_on():
     # 指定使用的 GPU ID
     # os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
-    batch_size = 16
+    batch_size = 64
     num_track_ids = 256
     gradient_accumulation_steps = 4
+    # Realbot
+    # sys.argv = [
+    #     "train_track_transformer_action_acc.py",
+    #     "--config-name=robocoin_track_transformer_action",
+    #     f"num_track_ids={num_track_ids}",
+    #     f"batch_size={batch_size}",
+    #     f"gradient_accumulation_steps={gradient_accumulation_steps}",
+    #     f"experiment=realbot_track_transformer_001B_action_bs_{batch_size}_grad_acc_{gradient_accumulation_steps}_numtrack_{num_track_ids}_ep1001",
+    #     "epochs=1001",
+    #     'train_jsonl="/data_jbx/Datasets/Realbot/episodes_train_realbot.jsonl"',
+    #     'val_jsonl="/data_jbx/Datasets/Realbot/episodes_val_realbot.jsonl"',
+    #     'train_dataset_dir="/data_jbx/Datasets/Realbot"',
+    #     'val_dataset_dir="/data_jbx/Datasets/Realbot"',
+    #     'stat_path="/data_jbx/Datasets/Realbot/4_4_four_tasks_wan/meta/stat.json"',
+    #     'model_load_path="/data_jbx/Codes/ATM/results/track_transformer/RoboCoin_Pretrain_Track_Action_Transformer/model_best.ckpt"',
+    # ]
+
+    # WorldArena
     sys.argv = [
         "train_track_transformer_action_acc.py",
         "--config-name=robocoin_track_transformer_action",
         f"num_track_ids={num_track_ids}",
         f"batch_size={batch_size}",
         f"gradient_accumulation_steps={gradient_accumulation_steps}",
-        f"experiment=realbot_track_transformer_001B_action_bs_{batch_size}_grad_acc_{gradient_accumulation_steps}_numtrack_{num_track_ids}_ep1001",
-        "epochs=1001",
-        'train_jsonl="/data_jbx/Datasets/Realbot/episodes_train_realbot.jsonl"',
-        'val_jsonl="/data_jbx/Datasets/Realbot/episodes_val_realbot.jsonl"',
-        'train_dataset_dir="/data_jbx/Datasets/Realbot"',
-        'val_dataset_dir="/data_jbx/Datasets/Realbot"',
-        'stat_path="/data_jbx/Datasets/Realbot/4_4_four_tasks_wan/meta/stat.json"',
-        'model_load_path="/data_jbx/Codes/ATM/results/track_transformer/RoboCoin_Pretrain_Track_Action_Transformer/model_best.ckpt"',
+        f"experiment=worldarena_track_transformer_001B_action_bs_{batch_size}_grad_acc_{gradient_accumulation_steps}_numtrack_{num_track_ids}_ep501",
+        "epochs=501",
+        'train_jsonl="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2/episodes_train_worldarena.jsonl"',
+        'val_jsonl="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2/episodes_val_worldarena.jsonl"',
+        'train_dataset_dir="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2"',
+        'val_dataset_dir="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2"',
+        'stat_path="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2/stat.json"',
     ]
 debug_on()
 

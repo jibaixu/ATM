@@ -21,3 +21,4 @@ ckpt_path: ???
 output_dir: null
 vis_every_n_batches: 10
 eval_batch_size: 1
+pixel_eval_img_size: [480, 640]

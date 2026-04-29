@@ -26,14 +26,15 @@ def debug_on():
     # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
     num_track_ids = 256
-    eval_batch_size = 1
+    eval_batch_size = 16
     vis_every_n_batches = 10
+    pixel_eval_img_size = "[480,640]"
     ckpt_path = os.path.join(
         PROJECT_ROOT,
         "results",
         "track_transformer",
-        "0409_realbot_track_transformer_001B_action_bs_16_grad_acc_4_numtrack_256_ep1001_0047",
-        "model_best.ckpt",
+        "0422_worldarena_track_transformer_001B_action_bs_64_grad_acc_4_numtrack_256_ep501_0243",
+        "model_105.ckpt",
     )
 
     sys.argv = [
@@ -43,10 +44,11 @@ def debug_on():
         f"batch_size={eval_batch_size}",
         f"eval_batch_size={eval_batch_size}",
         f"vis_every_n_batches={vis_every_n_batches}",
+        f"pixel_eval_img_size={pixel_eval_img_size}",
         f'ckpt_path="{ckpt_path}"',
-        'val_jsonl="/data_jbx/Datasets/Realbot/episodes_val_realbot.jsonl"',
-        'val_dataset_dir="/data_jbx/Datasets/Realbot"',
-        'stat_path="/data_jbx/Datasets/Realbot/4_4_four_tasks_wan/meta/stat.json"',
+        'val_jsonl="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2/episodes_val_worldarena.jsonl"',
+        'val_dataset_dir="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2"',
+        'stat_path="/data_jbx/Datasets/RoboTwin2.0_lerobot_v2/stat.json"',
     ]
 
 
@@ -125,7 +127,13 @@ def _iter_cli_override_keys():
 
 def _merge_eval_config(default_cfg: DictConfig, runtime_cfg: DictConfig) -> DictConfig:
     merged_cfg = OmegaConf.create(OmegaConf.to_container(runtime_cfg, resolve=False))
-    eval_keys = ("ckpt_path", "output_dir", "vis_every_n_batches", "eval_batch_size")
+    eval_keys = (
+        "ckpt_path",
+        "output_dir",
+        "vis_every_n_batches",
+        "eval_batch_size",
+        "pixel_eval_img_size",
+    )
 
     with open_dict(merged_cfg):
         for key in eval_keys:
@@ -206,6 +214,73 @@ def _update_metric_sums(metric_sums, ret_dict, batch_size: int):
     metric_sums["loss"] += float(ret_dict["loss"]) * batch_size
 
 
+def _normalize_img_size(img_size, field_name: str):
+    if img_size is None:
+        raise ValueError(f"Missing required `{field_name}`.")
+
+    if isinstance(img_size, int):
+        normalized_size = (img_size, img_size)
+    else:
+        try:
+            normalized_size = tuple(int(v) for v in img_size)
+        except TypeError as exc:
+            raise TypeError(
+                f"`{field_name}` must be an int or a length-2 iterable of ints, got {type(img_size)!r}."
+            ) from exc
+
+    if len(normalized_size) != 2:
+        raise ValueError(f"`{field_name}` must contain exactly 2 elements, got {normalized_size}.")
+    if normalized_size[0] <= 0 or normalized_size[1] <= 0:
+        raise ValueError(f"`{field_name}` values must be positive, got {normalized_size}.")
+    return normalized_size
+
+
+def _resolve_pixel_eval_img_size(cfg: DictConfig):
+    pixel_eval_img_size = cfg.get("pixel_eval_img_size")
+    if pixel_eval_img_size is None:
+        pixel_eval_img_size = cfg.get("img_size")
+    return _normalize_img_size(pixel_eval_img_size, field_name="pixel_eval_img_size")
+
+
+def _tracks_to_pixel_coords(tracks: torch.Tensor, img_size):
+    height, width = img_size
+    scale = tracks.new_tensor([float(width), float(height)], dtype=torch.float32)
+    return tracks.to(dtype=torch.float32) * scale
+
+
+def _accumulate_pixel_error(metric_sums, sum_key, count_key, pixel_errors, mask=None):
+    if mask is None:
+        metric_sums[sum_key] += float(pixel_errors.sum().item())
+        metric_sums[count_key] += int(pixel_errors.numel())
+        return
+
+    masked_count = int(mask.sum().item())
+    if masked_count == 0:
+        return
+
+    metric_sums[sum_key] += float(pixel_errors[mask].sum().item())
+    metric_sums[count_key] += masked_count
+
+
+def _update_pixel_error_sums(metric_sums, rec_track, track, vis, pixel_eval_img_size):
+    pixel_rec_track = _tracks_to_pixel_coords(rec_track, pixel_eval_img_size)
+    pixel_track = _tracks_to_pixel_coords(track, pixel_eval_img_size)
+    pixel_errors = torch.sqrt(torch.sum((pixel_rec_track - pixel_track) ** 2, dim=-1))
+    _accumulate_pixel_error(
+        metric_sums,
+        "pixel_l2_error_visible_sum",
+        "pixel_l2_error_visible_count",
+        pixel_errors,
+        mask=(vis > 0),
+    )
+    _accumulate_pixel_error(
+        metric_sums,
+        "pixel_l2_error_all_sum",
+        "pixel_l2_error_all_count",
+        pixel_errors,
+    )
+
+
 @hydra.main(
     config_path="./conf/train_track_transformer",
     config_name="eval_robocoin_track_transformer_action",
@@ -225,6 +300,7 @@ def main(cfg: DictConfig):
 
     vis_every_n_batches = int(cfg.get("vis_every_n_batches", 10))
     eval_batch_size = int(cfg.get("eval_batch_size", 1))
+    pixel_eval_img_size = _resolve_pixel_eval_img_size(cfg)
     vis_dir = os.path.join(cfg.output_dir, "visualizations")
     if vis_every_n_batches > 0:
         os.makedirs(vis_dir, exist_ok=True)
@@ -250,6 +326,10 @@ def main(cfg: DictConfig):
         "track_loss": 0.0,
         "img_loss": 0.0,
         "loss": 0.0,
+        "pixel_l2_error_visible_sum": 0.0,
+        "pixel_l2_error_visible_count": 0,
+        "pixel_l2_error_all_sum": 0.0,
+        "pixel_l2_error_all_count": 0,
     }
     num_samples = 0
     vis_disabled_for_batch_size = False
@@ -269,19 +349,28 @@ def main(cfg: DictConfig):
                 action,
             )
 
+            vis_for_loss = vis.clone()
             with _get_autocast_context(cfg, device):
-                _, ret_dict = model.forward_loss(
+                _, ret_dict, (rec_track, _) = model.forward_loss(
                     vid,
                     track,
                     task_emb,
                     lbd_track=cfg.lbd_track,
                     lbd_img=cfg.lbd_img,
                     p_img=cfg.p_img,
-                    vis=vis,
+                    vis=vis_for_loss,
                     action=action,
+                    return_outs=True,
                 )
 
             _update_metric_sums(metric_sums, ret_dict, batch_size=batch_size)
+            _update_pixel_error_sums(
+                metric_sums,
+                rec_track=rec_track,
+                track=track,
+                vis=vis,
+                pixel_eval_img_size=pixel_eval_img_size,
+            )
             num_samples += batch_size
 
             if vis_every_n_batches <= 0 or i % vis_every_n_batches != 0:
@@ -317,7 +406,29 @@ def main(cfg: DictConfig):
     avg_metrics = {
         key: (value / num_samples) if num_samples > 0 else float("nan")
         for key, value in metric_sums.items()
+        if key
+        not in {
+            "pixel_l2_error_visible_sum",
+            "pixel_l2_error_visible_count",
+            "pixel_l2_error_all_sum",
+            "pixel_l2_error_all_count",
+        }
     }
+    visible_point_count = metric_sums["pixel_l2_error_visible_count"]
+    all_point_count = metric_sums["pixel_l2_error_all_count"]
+    avg_metrics["pixel_l2_error_visible"] = (
+        metric_sums["pixel_l2_error_visible_sum"] / visible_point_count
+        if visible_point_count > 0
+        else float("nan")
+    )
+    avg_metrics["pixel_l2_error_all"] = (
+        metric_sums["pixel_l2_error_all_sum"] / all_point_count
+        if all_point_count > 0
+        else float("nan")
+    )
+    avg_metrics["pixel_eval_img_size"] = list(pixel_eval_img_size)
+    avg_metrics["pixel_l2_error_visible_count"] = visible_point_count
+    avg_metrics["pixel_l2_error_all_count"] = all_point_count
     avg_metrics["num_samples"] = num_samples
     avg_metrics["ckpt_path"] = cfg.ckpt_path
     avg_metrics["output_dir"] = cfg.output_dir

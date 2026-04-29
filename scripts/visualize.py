@@ -12,24 +12,17 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import decord
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-
-try:
-    import imageio
-except ImportError:
-    imageio = None
+import cv2
+import imageio
 
 from atm.utils.cotracker_utils import Visualizer
 
 # --- 基础配置 ---
 # 根据 preprocess_robocoin_2.py 中的设置 
-BASE_DIR = Path("/data_jbx/Datasets/Realbot/4_4_four_tasks_wan")
-VAL_JSONL = BASE_DIR / "meta" / "episodes.jsonl"
-SAVE_DIR = "results/vis_dataset/realbot"
-INDEX = 80
+BASE_DIR = Path("/data_jbx/Datasets/RoboTwin2.0_lerobot_v2")
+VAL_JSONL = BASE_DIR / "episodes_val_worldarena.jsonl"
+SAVE_DIR = "results/vis_dataset/worldarena"
+INDEX = 0
 
 def _load_video_frames_decord(video_path, frame_indices=None):
     vr = decord.VideoReader(str(video_path), ctx=decord.cpu(0))
@@ -130,9 +123,9 @@ def main():
     start_frame, end_frame = item['start_frame'], item['end_frame']
 
     # 2. 加载视频和轨迹
-    video_path = BASE_DIR / item['video'][0]
-    episode_name = Path(item['video'][0]).stem
-    track_path = BASE_DIR / "tracks" / "chunk-000" / "observation.tracks.image" / f"{episode_name}.npz"
+    video_path = BASE_DIR / item['video']
+    episode_name = Path(item['video']).stem
+    track_path = BASE_DIR / item['track']
     
     video_tensor = load_video_to_tensor(video_path) # (B, T, C, H, W)
     video_tensor = video_tensor[:, start_frame:end_frame+1, :, :, :] # 裁剪到指定帧范围
@@ -161,7 +154,7 @@ def main():
         video=video_tensor,
         tracks=tracks_tensor,
         visibility=visibility_tensor,
-        filename=f"ep_{item['episode_index']}_index{INDEX}_{Path(item['video'][0]).stem}_1000"
+        filename=f"ep_{item['episode_index']}_index{INDEX}_{Path(item['video']).stem}_1000"
     )
 
 if __name__ == "__main__":

@@ -43,6 +43,7 @@ dependencies:
       - matplotlib==3.7.2
       - matplotlib-inline==0.1.6
       - mediapy==1.2.0
+      - modelscope
       - moviepy==1.0.3
       - mujoco==2.3.7
       - natsort==8.4.0
